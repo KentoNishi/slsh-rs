@@ -5,6 +5,176 @@ mod ssh_args;
 mod tmux;
 mod transport;
 
+use anyhow::{Context, Result};
+use crossterm::cursor::{Hide, Show};
+use crossterm::event::{self, Event, KeyEventKind};
+use crossterm::execute;
+use crossterm::style::ResetColor;
+use crossterm::terminal::{self, Clear, ClearType};
+use predict::BasePredictor;
+use render::Renderer;
+use screen::{Screen, Size};
+use ssh_args::{LaunchMode, ParsedSshArgs};
+use std::env;
+use std::io::{self, IsTerminal, Write};
+use std::process::{Command, ExitStatus, Stdio};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tmux::ControlEvent;
+use transport::Transport;
+
 fn main() {
-    println!("slsh");
+    let code = match run() {
+        Ok(code) => code,
+        Err(error) => {
+            eprintln!("slsh: {error:#}");
+            1
+        }
+    };
+    std::process::exit(code);
+}
+
+fn run() -> Result<i32> {
+    let args = env::args().skip(1).collect();
+    let parsed = ssh_args::parse(args, io::stdin().is_terminal(), io::stdout().is_terminal());
+
+    match parsed.mode {
+        LaunchMode::Passthrough => run_passthrough(&parsed.forwarded_args),
+        LaunchMode::Compositor => run_compositor(parsed),
+    }
+}
+
+fn run_passthrough(args: &[String]) -> Result<i32> {
+    let status = Command::new("ssh")
+        .args(args)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .context("failed to run ssh")?;
+    Ok(exit_code(status))
+}
+
+fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
+    let host = parsed.host.as_ref().context("missing ssh host")?;
+    let launcher = if parsed.remote_command.is_empty() {
+        tmux::persistent_launcher()
+    } else {
+        tmux::command_launcher(&command_session_name(), &parsed.remote_command)
+    };
+
+    let mut ssh_args = parsed.ssh_options.clone();
+    ssh_args.push("-tt".into());
+    ssh_args.push(host.clone());
+    ssh_args.push(launcher);
+
+    let _terminal = TerminalGuard::enter()?;
+    let (cols, rows) = terminal::size().context("failed to read terminal size")?;
+    let mut screen = Screen::new(Size {
+        cols: cols.max(1),
+        rows: rows.max(1),
+    });
+    let mut parser = vte::Parser::new();
+    let mut predictor = BasePredictor::new(parsed.slsh.predict);
+    let mut renderer = Renderer::new();
+    let mut transport = Transport::spawn(&ssh_args)?;
+    let mut active_pane: Option<String> = None;
+    let mut stdout = io::stdout();
+    let mut done = false;
+
+    while !done {
+        let mut dirty = false;
+
+        for line in transport.drain_lines() {
+            match tmux::parse_control_line(&line) {
+                Some(ControlEvent::Output { pane, bytes }) => {
+                    active_pane = Some(pane);
+                    screen.feed(&mut parser, &bytes);
+                    predictor.reconcile(&screen);
+                    dirty = true;
+                }
+                Some(ControlEvent::Exit) => done = true,
+                Some(ControlEvent::Error(error)) => {
+                    transport.kill();
+                    anyhow::bail!("tmux error: {error}");
+                }
+                Some(ControlEvent::Notification(_)) | None => {}
+            }
+        }
+
+        while event::poll(Duration::from_millis(1)).context("failed to poll terminal input")? {
+            match event::read().context("failed to read terminal input")? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    let mapped = tmux::key_to_tmux(key, active_pane.as_deref());
+                    if let Some(command) = mapped.command {
+                        transport.write_command(&command)?;
+                    }
+                    predictor.on_key(mapped.intent, &screen);
+                    dirty = true;
+                }
+                Event::Resize(cols, rows) => {
+                    screen.resize(Size {
+                        cols: cols.max(1),
+                        rows: rows.max(1),
+                    });
+                    renderer.invalidate();
+                    predictor.clear();
+                    transport.write_command(&tmux::resize_command(cols.max(1), rows.max(1)))?;
+                    dirty = true;
+                }
+                Event::Paste(_) => {
+                    predictor.clear();
+                    dirty = true;
+                }
+                _ => {}
+            }
+        }
+
+        if dirty {
+            let output = renderer.render(&screen, &predictor.overlay);
+            stdout
+                .write_all(output.as_bytes())
+                .context("failed to render terminal")?;
+            stdout.flush().context("failed to flush terminal")?;
+        }
+
+        if let Some(status) = transport.try_wait()? {
+            return Ok(exit_code(status));
+        }
+
+        if !dirty {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    Ok(exit_code(transport.wait()?))
+}
+
+fn command_session_name() -> String {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default();
+    format!("slsh-cmd-{}-{millis}", std::process::id())
+}
+
+fn exit_code(status: ExitStatus) -> i32 {
+    status.code().unwrap_or(255)
+}
+
+struct TerminalGuard;
+
+impl TerminalGuard {
+    fn enter() -> Result<Self> {
+        terminal::enable_raw_mode().context("failed to enable raw mode")?;
+        execute!(io::stdout(), Hide, Clear(ClearType::All))
+            .context("failed to prepare terminal")?;
+        Ok(Self)
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = execute!(io::stdout(), ResetColor, Show);
+        let _ = terminal::disable_raw_mode();
+    }
 }

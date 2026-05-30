@@ -37,7 +37,7 @@ pub fn command_launcher(session_name: &str, remote_command: &[String]) -> String
 }
 
 pub fn parse_control_line(line: &str) -> Option<ControlEvent> {
-    if line == "%exit" {
+    if line == "%exit" || line.starts_with("%exit ") {
         return Some(ControlEvent::Exit);
     }
 

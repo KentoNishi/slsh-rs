@@ -94,6 +94,7 @@ impl Screen {
         self.cursor
     }
 
+    #[cfg(test)]
     pub fn active(&self) -> ActiveBuffer {
         self.active
     }

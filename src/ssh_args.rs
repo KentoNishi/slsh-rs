@@ -12,6 +12,7 @@ pub struct SlshOptions {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedSshArgs {
     pub forwarded_args: Vec<String>,
+    pub ssh_options: Vec<String>,
     pub host: Option<String>,
     pub remote_command: Vec<String>,
     pub slsh: SlshOptions,
@@ -20,6 +21,7 @@ pub struct ParsedSshArgs {
 
 #[derive(Debug, Default)]
 struct ParseState {
+    ssh_options: Vec<String>,
     host: Option<String>,
     remote_command: Vec<String>,
     no_session: bool,
@@ -59,6 +61,7 @@ pub fn parse(args: Vec<String>, stdin_is_tty: bool, stdout_is_tty: bool) -> Pars
 
     ParsedSshArgs {
         forwarded_args,
+        ssh_options: state.ssh_options,
         host: state.host,
         remote_command: state.remote_command,
         slsh,
@@ -96,6 +99,8 @@ fn inspect_forwarded(args: &[String]) -> ParseState {
         }
 
         let consumed = inspect_option(args, i, &mut state);
+        let end = (i + consumed.max(1)).min(args.len());
+        state.ssh_options.extend(args[i..end].iter().cloned());
         i += consumed.max(1);
     }
 
@@ -221,6 +226,7 @@ mod tests {
 
         assert_eq!(parsed.host.as_deref(), Some("user@host"));
         assert_eq!(parsed.remote_command, Vec::<String>::new());
+        assert_eq!(parsed.ssh_options, Vec::<String>::new());
         assert_eq!(parsed.mode, LaunchMode::Compositor);
     }
 
@@ -238,6 +244,17 @@ mod tests {
 
         assert_eq!(parsed.host.as_deref(), Some("user@host"));
         assert_eq!(parsed.mode, LaunchMode::Compositor);
+        assert_eq!(
+            parsed.ssh_options,
+            vec![
+                "-p2222",
+                "-i",
+                "key",
+                "-oStrictHostKeyChecking=no",
+                "-J",
+                "jump",
+            ]
+        );
         assert_eq!(
             parsed.forwarded_args,
             vec![
