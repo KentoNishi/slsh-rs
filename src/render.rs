@@ -60,7 +60,7 @@ pub fn compose_frame(screen: &Screen, overlay: &Overlay) -> Frame {
 fn full_draw(frame: &Frame) -> String {
     let mut out = String::from("\x1b[?25l\x1b[0m\x1b[2J");
     for row in 0..frame.size.rows {
-        emit_row_span(&mut out, frame, row, 0, frame.size.cols);
+        emit_changed_row(&mut out, frame, row);
     }
     move_cursor(&mut out, frame.cursor);
     out
@@ -94,6 +94,24 @@ fn diff_draw(last: &Frame, next: &Frame) -> String {
     }
     move_cursor(&mut out, next.cursor);
     out
+}
+
+fn emit_changed_row(out: &mut String, frame: &Frame, row: u16) {
+    let mut col = 0;
+    while col < frame.size.cols {
+        let start = col;
+        let index = row as usize * frame.size.cols as usize + col as usize;
+        let style = frame.cells[index].style;
+        col += 1;
+        while col < frame.size.cols {
+            let index = row as usize * frame.size.cols as usize + col as usize;
+            if frame.cells[index].style != style {
+                break;
+            }
+            col += 1;
+        }
+        emit_row_span(out, frame, row, start, col);
+    }
 }
 
 fn emit_row_span(out: &mut String, frame: &Frame, row: u16, start: u16, end: u16) {
@@ -166,6 +184,24 @@ mod tests {
 
         assert!(out.contains("\x1b[2J"));
         assert!(out.contains("hi   "));
+    }
+
+    #[test]
+    fn first_render_preserves_mixed_styles() {
+        let screen = screen_with(b"\x1b[31mR\x1b[0mN");
+        let mut renderer = Renderer::new();
+
+        let out = renderer.render(
+            &screen,
+            &Overlay {
+                enabled: true,
+                cells: Vec::new(),
+                cursor: None,
+            },
+        );
+
+        assert!(out.contains("\x1b[31mR"));
+        assert!(out.contains("\x1b[0mN"));
     }
 
     #[test]

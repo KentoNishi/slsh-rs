@@ -37,6 +37,8 @@ pub fn command_launcher(session_name: &str, remote_command: &[String]) -> String
 }
 
 pub fn parse_control_line(line: &str) -> Option<ControlEvent> {
+    let line = normalize_control_line(line)?;
+
     if line == "%exit" || line.starts_with("%exit ") {
         return Some(ControlEvent::Exit);
     }
@@ -48,15 +50,19 @@ pub fn parse_control_line(line: &str) -> Option<ControlEvent> {
     if let Some(rest) = line.strip_prefix("%output ") {
         let mut parts = rest.splitn(2, ' ');
         let pane = parts.next()?.to_string();
-        let escaped = parts.next().unwrap_or_default();
+        let escaped = unquote_output(parts.next().unwrap_or_default());
         return Some(ControlEvent::Output {
             pane,
-            bytes: decode_tmux_bytes(escaped),
+            bytes: decode_tmux_bytes(&escaped),
         });
     }
 
     line.starts_with('%')
         .then(|| ControlEvent::Notification(line.to_string()))
+}
+
+pub fn is_control_line(line: &str) -> bool {
+    normalize_control_line(line).is_some()
 }
 
 pub fn key_to_tmux(event: KeyEvent, pane: Option<&str>) -> TmuxKey {
@@ -172,6 +178,21 @@ fn quote_tmux_word(value: &str) -> String {
     quoted
 }
 
+fn normalize_control_line(line: &str) -> Option<&str> {
+    let line = line.trim_end_matches('\r');
+    let start = line.find('%')?;
+    let line = &line[start..];
+    Some(line.strip_suffix("\x1b\\").unwrap_or(line))
+}
+
+fn unquote_output(value: &str) -> String {
+    if value.len() >= 2 && value.starts_with('"') && value.ends_with('"') {
+        value[1..value.len() - 1].to_string()
+    } else {
+        value.to_string()
+    }
+}
+
 fn decode_tmux_bytes(value: &str) -> Vec<u8> {
     let mut bytes = Vec::new();
     let mut iter = value.as_bytes().iter().copied().peekable();
@@ -198,6 +219,10 @@ fn decode_tmux_bytes(value: &str) -> Vec<u8> {
             Some(b't') => {
                 iter.next();
                 bytes.push(b'\t');
+            }
+            Some(b'"') => {
+                iter.next();
+                bytes.push(b'"');
             }
             Some(next) if next.is_ascii_digit() => {
                 let mut value = 0u8;
@@ -260,13 +285,41 @@ mod tests {
 
     #[test]
     fn parses_output_escapes() {
-        let parsed = parse_control_line("%output %1 hi\\012there\\\\x").unwrap();
+        let parsed = parse_control_line("%output %1 \"hi\\012there\\\\x\"").unwrap();
 
         assert_eq!(
             parsed,
             ControlEvent::Output {
                 pane: "%1".into(),
                 bytes: b"hi\nthere\\x".to_vec()
+            }
+        );
+    }
+
+    #[test]
+    fn parses_dcs_wrapped_output() {
+        let parsed =
+            parse_control_line("\x1bP1000p%output %5 \"\\033[31mred\\033[0m\\015\\012\"\x1b\\")
+                .unwrap();
+
+        assert_eq!(
+            parsed,
+            ControlEvent::Output {
+                pane: "%5".into(),
+                bytes: b"\x1b[31mred\x1b[0m\r\n".to_vec()
+            }
+        );
+    }
+
+    #[test]
+    fn parses_unquoted_output() {
+        let parsed = parse_control_line("%output %7 bash-5.0# ").unwrap();
+
+        assert_eq!(
+            parsed,
+            ControlEvent::Output {
+                pane: "%7".into(),
+                bytes: b"bash-5.0# ".to_vec()
             }
         );
     }

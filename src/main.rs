@@ -155,7 +155,7 @@ fn wait_for_control_start(transport: &mut Transport) -> Result<Vec<String>> {
     let mut pending = Vec::new();
     loop {
         for line in transport.drain_lines() {
-            if line.starts_with('%') {
+            if tmux::is_control_line(&line) {
                 pending.push(line);
                 return Ok(pending);
             }
