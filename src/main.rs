@@ -6,5 +6,5 @@ mod tmux;
 mod transport;
 
 fn main() {
-    println!("slsh scaffold");
+    println!("slsh");
 }
