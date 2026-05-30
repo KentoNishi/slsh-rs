@@ -3,6 +3,9 @@ name: build binaries
 on:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     name: ${{ matrix.name }}
@@ -15,10 +18,12 @@ jobs:
             runner: ubuntu-latest
             artifact: slsh-linux-x64
             binary: target/release/slsh
+            asset: slsh-linux-x64
           - name: windows x64
             runner: windows-latest
             artifact: slsh-windows-x64
             binary: target/release/slsh.exe
+            asset: slsh-windows-x64.exe
 
     steps:
       - name: Checkout
@@ -27,9 +32,39 @@ jobs:
       - name: Build release binary
         run: cargo build --release --locked
 
+      - name: Stage binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp "${{ matrix.binary }}" "dist/${{ matrix.asset }}"
+
       - name: Upload binary
         uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
-          path: ${{ matrix.binary }}
+          path: dist/${{ matrix.asset }}
           if-no-files-found: error
+
+  release:
+    name: direct binary downloads
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Download binaries
+        uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: manual-build-${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          gh release delete "${TAG}" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "${TAG}" dist/* \
+            --title "manual build ${{ github.run_number }}" \
+            --notes "Manual binary build from ${GITHUB_SHA}." \
+            --target "${GITHUB_SHA}"

@@ -152,13 +152,10 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
 }
 
 fn wait_for_control_start(transport: &mut Transport) -> Result<Vec<String>> {
-    let mut pending = Vec::new();
     loop {
-        for line in transport.drain_lines() {
-            if tmux::is_control_line(&line) {
-                pending.push(line);
-                return Ok(pending);
-            }
+        let lines = transport.drain_lines();
+        if lines.iter().any(|line| tmux::is_control_line(line)) {
+            return Ok(lines);
         }
         if let Some(status) = transport.try_wait()? {
             anyhow::bail!("ssh exited before tmux control mode started with status {status}");
