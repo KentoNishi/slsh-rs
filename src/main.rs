@@ -16,6 +16,8 @@ use render::Renderer;
 use screen::{Screen, Size};
 use ssh_args::{LaunchMode, ParsedSshArgs};
 use std::env;
+use std::fmt;
+use std::fs::{File, OpenOptions};
 use std::io::{self, IsTerminal, Write};
 use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -81,6 +83,7 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
     let mut active_pane: Option<String> = None;
     let mut stdout = io::stdout();
     let mut done = false;
+    let mut key_trace = KeyTrace::from_env();
 
     while !done {
         let mut dirty = false;
@@ -107,6 +110,10 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
             match event::read().context("failed to read terminal input")? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
                     let mapped = tmux::key_to_tmux(key, active_pane.as_deref());
+                    key_trace.log(format_args!(
+                        "key {:?} pane {:?} command {:?} intent {:?}",
+                        key, active_pane, mapped.command, mapped.intent
+                    ));
                     if let Some(command) = mapped.command {
                         transport.write_command(&command)?;
                     }
@@ -125,6 +132,10 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
                 }
                 Event::Paste(text) => {
                     let command = tmux::paste_to_tmux(&text, active_pane.as_deref());
+                    key_trace.log(format_args!(
+                        "paste {:?} pane {:?} command {:?}",
+                        text, active_pane, command
+                    ));
                     if !command.is_empty() {
                         transport.write_command(&command)?;
                     }
@@ -191,6 +202,24 @@ impl TerminalGuard {
         execute!(io::stdout(), Hide, Clear(ClearType::All))
             .context("failed to prepare terminal")?;
         Ok(Self)
+    }
+}
+
+struct KeyTrace {
+    file: Option<File>,
+}
+
+impl KeyTrace {
+    fn from_env() -> Self {
+        let file = env::var_os("SLSH_KEY_LOG")
+            .and_then(|path| OpenOptions::new().create(true).append(true).open(path).ok());
+        Self { file }
+    }
+
+    fn log(&mut self, args: fmt::Arguments<'_>) {
+        if let Some(file) = &mut self.file {
+            let _ = writeln!(file, "{args}");
+        }
     }
 }
 
