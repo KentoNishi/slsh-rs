@@ -84,6 +84,21 @@ pub fn key_to_tmux(event: KeyEvent, pane: Option<&str>) -> TmuxKey {
         }
     }
 
+    if let KeyCode::Char(ch) = event.code {
+        match ch {
+            '\r' | '\n' => return named_key(pane, "Enter"),
+            '\t' => return named_key(pane, "Tab"),
+            '\u{8}' | '\u{7f}' => {
+                return named_key(pane, "BSpace").with_intent(KeyIntent::Backspace);
+            }
+            _ => {
+                if let Some(mapped) = raw_control_key(ch, pane) {
+                    return mapped;
+                }
+            }
+        }
+    }
+
     if modifiers.contains(KeyModifiers::ALT) {
         if let KeyCode::Char(ch) = event.code {
             return named_key(pane, &format!("M-{ch}"));
@@ -114,6 +129,28 @@ pub fn key_to_tmux(event: KeyEvent, pane: Option<&str>) -> TmuxKey {
             command: None,
             intent: KeyIntent::Unsupported,
         },
+    }
+}
+
+fn raw_control_key(ch: char, pane: Option<&str>) -> Option<TmuxKey> {
+    match ch as u32 {
+        0x01..=0x1a => {
+            let letter = (b'a' + (ch as u8) - 1) as char;
+            if letter == 'g' {
+                Some(TmuxKey {
+                    command: None,
+                    intent: KeyIntent::TogglePrediction,
+                })
+            } else {
+                Some(named_key(pane, &format!("C-{letter}")))
+            }
+        }
+        0x1b => Some(named_key(pane, "Escape")),
+        0x1c => Some(named_key(pane, "C-\\")),
+        0x1d => Some(named_key(pane, "C-]")),
+        0x1e => Some(named_key(pane, "C-^")),
+        0x1f => Some(named_key(pane, "C-_")),
+        _ => None,
     }
 }
 
@@ -356,6 +393,15 @@ mod tests {
 
         let ctrl_c = key_to_tmux(key(KeyCode::Char('c'), KeyModifiers::CONTROL), Some("%1"));
         assert_eq!(ctrl_c.intent, KeyIntent::Nonlinear);
+        assert_eq!(ctrl_c.command.as_deref(), Some("send-keys -t %1 C-c\n"));
+    }
+
+    #[test]
+    fn maps_raw_control_bytes() {
+        let enter = key_to_tmux(key(KeyCode::Char('\r'), KeyModifiers::NONE), Some("%1"));
+        assert_eq!(enter.command.as_deref(), Some("send-keys -t %1 Enter\n"));
+
+        let ctrl_c = key_to_tmux(key(KeyCode::Char('\u{3}'), KeyModifiers::NONE), Some("%1"));
         assert_eq!(ctrl_c.command.as_deref(), Some("send-keys -t %1 C-c\n"));
     }
 

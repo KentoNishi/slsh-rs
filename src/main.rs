@@ -180,6 +180,9 @@ struct TerminalGuard;
 
 impl TerminalGuard {
     fn enter() -> Result<Self> {
+        #[cfg(windows)]
+        let _ = crossterm::ansi_support::supports_ansi();
+
         terminal::enable_raw_mode().context("failed to enable raw mode")?;
         execute!(io::stdout(), Hide, Clear(ClearType::All))
             .context("failed to prepare terminal")?;

@@ -146,12 +146,20 @@ fn set_style(out: &mut String, style: Style) {
     match style.fg {
         Color::Default => {}
         Color::Indexed(index) if index < 8 => out.push_str(&format!("\x1b[{}m", 30 + index)),
-        Color::Indexed(index) => out.push_str(&format!("\x1b[{}m", 90 + index.saturating_sub(8))),
+        Color::Indexed(index) if index < 16 => {
+            out.push_str(&format!("\x1b[{}m", 90 + index.saturating_sub(8)));
+        }
+        Color::Indexed(index) => out.push_str(&format!("\x1b[38;5;{index}m")),
+        Color::Rgb(r, g, b) => out.push_str(&format!("\x1b[38;2;{r};{g};{b}m")),
     }
     match style.bg {
         Color::Default => {}
         Color::Indexed(index) if index < 8 => out.push_str(&format!("\x1b[{}m", 40 + index)),
-        Color::Indexed(index) => out.push_str(&format!("\x1b[{}m", 100 + index.saturating_sub(8))),
+        Color::Indexed(index) if index < 16 => {
+            out.push_str(&format!("\x1b[{}m", 100 + index.saturating_sub(8)));
+        }
+        Color::Indexed(index) => out.push_str(&format!("\x1b[48;5;{index}m")),
+        Color::Rgb(r, g, b) => out.push_str(&format!("\x1b[48;2;{r};{g};{b}m")),
     }
 }
 
@@ -202,6 +210,24 @@ mod tests {
 
         assert!(out.contains("\x1b[31mR"));
         assert!(out.contains("\x1b[0mN"));
+    }
+
+    #[test]
+    fn render_emits_extended_colors() {
+        let screen = screen_with(b"\x1b[38;5;196mA\x1b[48;2;10;20;30mB");
+        let mut renderer = Renderer::new();
+
+        let out = renderer.render(
+            &screen,
+            &Overlay {
+                enabled: true,
+                cells: Vec::new(),
+                cursor: None,
+            },
+        );
+
+        assert!(out.contains("\x1b[38;5;196mA"));
+        assert!(out.contains("\x1b[48;2;10;20;30mB"));
     }
 
     #[test]

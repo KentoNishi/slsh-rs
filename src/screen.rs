@@ -18,6 +18,7 @@ pub enum Color {
     #[default]
     Default,
     Indexed(u8),
+    Rgb(u8, u8, u8),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -62,6 +63,7 @@ pub struct Screen {
     scroll_bottom: u16,
     style: Style,
     wrap_next: bool,
+    dec_special_graphics: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -83,6 +85,7 @@ impl Screen {
             scroll_bottom: bottom,
             style: Style::default(),
             wrap_next: false,
+            dec_special_graphics: false,
         }
     }
 
@@ -147,6 +150,11 @@ impl Screen {
     }
 
     fn put_char(&mut self, ch: char) {
+        let ch = if self.dec_special_graphics {
+            map_dec_special_graphics(ch)
+        } else {
+            ch
+        };
         let width = UnicodeWidthChar::width(ch).unwrap_or(0);
         if width == 0 || self.size.cols == 0 || self.size.rows == 0 {
             return;
@@ -326,7 +334,9 @@ impl Screen {
             return;
         }
 
-        for param in params.iter() {
+        let groups: Vec<&[u16]> = params.iter().collect();
+        let mut index = 0;
+        while let Some(param) = groups.get(index).copied() {
             let code = param.first().copied().unwrap_or(0);
             match code {
                 0 => self.style = Style::default(),
@@ -340,10 +350,23 @@ impl Screen {
                 39 => self.style.fg = Color::Default,
                 40..=47 => self.style.bg = Color::Indexed((code - 40) as u8),
                 49 => self.style.bg = Color::Default,
+                38 => {
+                    if let Some((color, consumed)) = extended_color(param, &groups[index + 1..]) {
+                        self.style.fg = color;
+                        index += consumed;
+                    }
+                }
+                48 => {
+                    if let Some((color, consumed)) = extended_color(param, &groups[index + 1..]) {
+                        self.style.bg = color;
+                        index += consumed;
+                    }
+                }
                 90..=97 => self.style.fg = Color::Indexed((code - 90 + 8) as u8),
                 100..=107 => self.style.bg = Color::Indexed((code - 100 + 8) as u8),
                 _ => {}
             }
+            index += 1;
         }
     }
 
@@ -489,8 +512,17 @@ impl Perform for Screen {
         }
     }
 
-    fn esc_dispatch(&mut self, _intermediates: &[u8], ignore: bool, byte: u8) {
+    fn esc_dispatch(&mut self, intermediates: &[u8], ignore: bool, byte: u8) {
         if ignore {
+            return;
+        }
+
+        if intermediates == b"(" {
+            match byte {
+                b'0' => self.dec_special_graphics = true,
+                b'B' => self.dec_special_graphics = false,
+                _ => {}
+            }
             return;
         }
 
@@ -629,6 +661,62 @@ fn has_private_mode(params: &Params, modes: &[u16]) -> bool {
         .any(|value| modes.contains(&value))
 }
 
+fn extended_color(current: &[u16], rest: &[&[u16]]) -> Option<(Color, usize)> {
+    if current.len() >= 3 && current[1] == 5 {
+        return Some((Color::Indexed(current[2].min(u8::MAX as u16) as u8), 0));
+    }
+    if current.len() >= 5 && current[1] == 2 {
+        let rgb = &current[current.len() - 3..];
+        return Some((rgb_color(rgb[0], rgb[1], rgb[2]), 0));
+    }
+    if rest.len() >= 2 && rest[0].first() == Some(&5) {
+        return rest[1]
+            .first()
+            .map(|index| (Color::Indexed((*index).min(u8::MAX as u16) as u8), 2));
+    }
+    if rest.len() >= 4 && rest[0].first() == Some(&2) {
+        return match (
+            rest[1].first().copied(),
+            rest[2].first().copied(),
+            rest[3].first().copied(),
+        ) {
+            (Some(r), Some(g), Some(b)) => Some((rgb_color(r, g, b), 4)),
+            _ => None,
+        };
+    }
+    None
+}
+
+fn rgb_color(r: u16, g: u16, b: u16) -> Color {
+    Color::Rgb(
+        r.min(u8::MAX as u16) as u8,
+        g.min(u8::MAX as u16) as u8,
+        b.min(u8::MAX as u16) as u8,
+    )
+}
+
+fn map_dec_special_graphics(ch: char) -> char {
+    match ch {
+        '`' => '◆',
+        'a' => '▒',
+        'f' => '°',
+        'g' => '±',
+        'j' => '┘',
+        'k' => '┐',
+        'l' => '┌',
+        'm' => '└',
+        'n' => '┼',
+        'q' => '─',
+        't' => '├',
+        'u' => '┤',
+        'v' => '┴',
+        'w' => '┬',
+        'x' => '│',
+        '~' => '·',
+        _ => ch,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -697,6 +785,38 @@ mod tests {
             screen.cell(Cursor { row: 0, col: 1 }).style,
             Style::default()
         );
+    }
+
+    #[test]
+    fn tracks_extended_colors() {
+        let mut screen = Screen::new(Size { cols: 4, rows: 1 });
+
+        feed(&mut screen, b"\x1b[38;5;196mA\x1b[48;2;10;20;30mB\x1b[0mC");
+
+        assert_eq!(
+            screen.cell(Cursor { row: 0, col: 0 }).style.fg,
+            Color::Indexed(196)
+        );
+        assert_eq!(
+            screen.cell(Cursor { row: 0, col: 1 }).style.bg,
+            Color::Rgb(10, 20, 30)
+        );
+        assert_eq!(
+            screen.cell(Cursor { row: 0, col: 2 }).style,
+            Style::default()
+        );
+    }
+
+    #[test]
+    fn maps_dec_special_graphics() {
+        let mut screen = Screen::new(Size { cols: 4, rows: 1 });
+
+        feed(&mut screen, b"\x1b(0lqk\x1b(Bx");
+
+        assert_eq!(screen.cell(Cursor { row: 0, col: 0 }).ch, '┌');
+        assert_eq!(screen.cell(Cursor { row: 0, col: 1 }).ch, '─');
+        assert_eq!(screen.cell(Cursor { row: 0, col: 2 }).ch, '┐');
+        assert_eq!(screen.cell(Cursor { row: 0, col: 3 }).ch, 'x');
     }
 
     #[test]

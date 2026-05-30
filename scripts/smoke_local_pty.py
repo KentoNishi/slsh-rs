@@ -24,16 +24,28 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory() as tmp:
         fake_ssh = os.path.join(tmp, "ssh")
+        fake_ssh_log = os.path.join(tmp, "ssh.stdin")
         write_fake_ssh(fake_ssh)
 
         env = os.environ.copy()
         env["PATH"] = f"{tmp}{os.pathsep}{env['PATH']}"
+        env["FAKE_SSH_LOG"] = fake_ssh_log
 
         output = run_slsh(env)
+        if os.path.exists(fake_ssh_log):
+            with open(fake_ssh_log, "rb") as handle:
+                control_input = handle.read()
+        else:
+            control_input = b""
 
     checks = {
         "echo command output": b"hello" in output,
         "red sgr output": b"\x1b[31mred" in output,
+        "256-color sgr output": b"\x1b[38;5;196mhot" in output,
+        "dec special graphics output": "┌─┐".encode() in output,
+        "enter key forwarded": b"send-keys" in control_input and b"Enter" in control_input,
+        "ctrl-c forwarded": b"send-keys" in control_input and b"C-c" in control_input,
+        "left key forwarded": b"send-keys" in control_input and b"Left" in control_input,
         "tmux prompt/output rendered": b"bash" in output or b"#" in output or b"$" in output,
     }
 
@@ -42,6 +54,8 @@ def main() -> int:
         sys.stderr.write("local PTY smoke failed:\n")
         for name in failed:
             sys.stderr.write(f"  missing {name}\n")
+        sys.stderr.write("\nCommands sent to tmux:\n")
+        sys.stderr.buffer.write(control_input)
         sys.stderr.write("\nCaptured bytes:\n")
         sys.stderr.buffer.write(output)
         sys.stderr.write("\n")
@@ -64,6 +78,7 @@ import select
 import sys
 
 remote_command = sys.argv[-1]
+log_path = os.environ.get("FAKE_SSH_LOG")
 pid, fd = pty.fork()
 if pid == 0:
     os.execlp("bash", "bash", "-lc", remote_command)
@@ -82,6 +97,9 @@ while True:
         data = os.read(sys.stdin.fileno(), 4096)
         if not data:
             break
+        if log_path:
+            with open(log_path, "ab") as handle:
+                handle.write(data)
         os.write(fd, data)
 """
     with open(path, "w", encoding="utf-8") as handle:
@@ -106,32 +124,41 @@ def run_slsh(env: dict[str, str]) -> bytes:
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
 
     output = b""
-    sent_echo = False
-    sent_color = False
-    deadline = time.time() + 10
+    stage = "wait_prompt"
+    stage_at = time.time()
+    deadline = time.time() + 15
 
     try:
         while time.time() < deadline:
             readable, _, _ = select.select([fd], [], [], 0.05)
-            if not readable:
-                continue
+            if readable:
+                try:
+                    chunk = os.read(fd, 4096)
+                except OSError:
+                    break
+                if not chunk:
+                    break
 
-            try:
-                chunk = os.read(fd, 4096)
-            except OSError:
-                break
-            if not chunk:
-                break
+                output += chunk
 
-            output += chunk
-
-            if not sent_echo and prompt_seen(output):
+            if stage == "wait_prompt" and prompt_seen(output):
+                os.write(fd, b"xy\x1b[D\x03")
+                stage = "sent_shortcuts"
+                stage_at = time.time()
+            elif stage == "sent_shortcuts" and time.time() - stage_at > 0.25:
                 os.write(fd, b"echo hello\r")
-                sent_echo = True
-            elif sent_echo and not sent_color and b"hello" in output:
+                stage = "wait_hello"
+            elif stage == "wait_hello" and b"hello" in output:
                 os.write(fd, b"printf '\\033[31mred\\033[0m\\n'\r")
-                sent_color = True
-            elif sent_color and b"\x1b[31mred" in output:
+                os.write(fd, b"printf '\\033[38;5;196mhot\\033[0m\\n'\r")
+                os.write(fd, b"printf '\\033(0lqk\\033(B\\n'\r")
+                stage = "wait_features"
+            elif (
+                stage == "wait_features"
+                and b"\x1b[31mred" in output
+                and b"\x1b[38;5;196mhot" in output
+                and "┌─┐".encode() in output
+            ):
                 os.write(fd, b"exit\r")
                 return output
     finally:
