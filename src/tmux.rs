@@ -86,7 +86,7 @@ pub fn key_to_tmux(event: KeyEvent, pane: Option<&str>) -> TmuxKey {
 
     if let KeyCode::Char(ch) = event.code {
         match ch {
-            '\r' | '\n' => return named_key(pane, "C-m"),
+            '\r' | '\n' => return hex_key(pane, 0x0d),
             '\t' => return named_key(pane, "Tab"),
             '\u{8}' | '\u{7f}' => {
                 return named_key(pane, "BSpace").with_intent(KeyIntent::Backspace);
@@ -112,7 +112,7 @@ pub fn key_to_tmux(event: KeyEvent, pane: Option<&str>) -> TmuxKey {
     match event.code {
         KeyCode::Char(ch) => literal_key(pane, ch),
         KeyCode::Backspace => named_key(pane, "BSpace").with_intent(KeyIntent::Backspace),
-        KeyCode::Enter => named_key(pane, "C-m"),
+        KeyCode::Enter => hex_key(pane, 0x0d),
         KeyCode::Tab | KeyCode::BackTab => named_key(pane, "Tab"),
         KeyCode::Esc => named_key(pane, "Escape"),
         KeyCode::Left => named_key(pane, "Left"),
@@ -170,11 +170,11 @@ pub fn paste_to_tmux(text: &str, pane: Option<&str>) -> String {
                 if chars.peek() == Some(&'\n') {
                     chars.next();
                 }
-                command.push_str(&named_key(pane, "C-m").command.unwrap_or_default());
+                command.push_str(&hex_key(pane, 0x0d).command.unwrap_or_default());
             }
             '\n' => {
                 flush_literal(&mut command, pane, &mut literal);
-                command.push_str(&named_key(pane, "C-m").command.unwrap_or_default());
+                command.push_str(&hex_key(pane, 0x0d).command.unwrap_or_default());
             }
             '\t' => {
                 flush_literal(&mut command, pane, &mut literal);
@@ -237,6 +237,21 @@ fn named_key(pane: Option<&str>, name: &str) -> TmuxKey {
     }
     command.push_str(name);
     command.push('\n');
+
+    TmuxKey {
+        command: Some(command),
+        intent: KeyIntent::Nonlinear,
+    }
+}
+
+fn hex_key(pane: Option<&str>, byte: u8) -> TmuxKey {
+    let mut command = String::from("send-keys ");
+    if let Some(pane) = pane {
+        command.push_str("-t ");
+        command.push_str(pane);
+        command.push(' ');
+    }
+    command.push_str(&format!("-H {byte:02x}\n"));
 
     TmuxKey {
         command: Some(command),
@@ -452,7 +467,7 @@ mod tests {
     #[test]
     fn maps_raw_control_bytes() {
         let enter = key_to_tmux(key(KeyCode::Char('\r'), KeyModifiers::NONE), Some("%1"));
-        assert_eq!(enter.command.as_deref(), Some("send-keys -t %1 C-m\n"));
+        assert_eq!(enter.command.as_deref(), Some("send-keys -t %1 -H 0d\n"));
 
         let ctrl_c = key_to_tmux(key(KeyCode::Char('\u{3}'), KeyModifiers::NONE), Some("%1"));
         assert_eq!(ctrl_c.command.as_deref(), Some("send-keys -t %1 C-c\n"));
@@ -462,7 +477,7 @@ mod tests {
     fn maps_paste_text() {
         assert_eq!(
             paste_to_tmux("echo hi\r\n", Some("%1")),
-            "send-keys -t %1 -l -- 'echo hi'\nsend-keys -t %1 C-m\n"
+            "send-keys -t %1 -l -- 'echo hi'\nsend-keys -t %1 -H 0d\n"
         );
     }
 
