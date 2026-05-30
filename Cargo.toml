@@ -1,0 +1,13 @@
+[package]
+name = "slsh"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+crossterm = "0.29"
+shell-words = "1"
+unicode-width = "0.2"
+vte = "0.15"
+
