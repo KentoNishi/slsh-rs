@@ -43,7 +43,7 @@ def main() -> int:
         "red sgr output": b"\x1b[31mred" in output,
         "256-color sgr output": b"\x1b[38;5;196mhot" in output,
         "dec special graphics output": "┌─┐".encode() in output,
-        "enter key forwarded": b"send-keys" in control_input and b"C-m" in control_input,
+        "enter key forwarded": b"send-keys" in control_input and b"-H 0d" in control_input,
         "backspace key forwarded": b"send-keys" in control_input and b"BSpace" in control_input,
         "ctrl-c forwarded": b"send-keys" in control_input and b"C-c" in control_input,
         "left key forwarded": b"send-keys" in control_input and b"Left" in control_input,
