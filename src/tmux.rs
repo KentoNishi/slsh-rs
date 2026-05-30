@@ -158,7 +158,64 @@ pub fn resize_command(cols: u16, rows: u16) -> String {
     format!("refresh-client -C {cols}x{rows}\n")
 }
 
+pub fn paste_to_tmux(text: &str, pane: Option<&str>) -> String {
+    let mut command = String::new();
+    let mut literal = String::new();
+    let mut chars = text.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\r' => {
+                flush_literal(&mut command, pane, &mut literal);
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                command.push_str(&named_key(pane, "C-m").command.unwrap_or_default());
+            }
+            '\n' => {
+                flush_literal(&mut command, pane, &mut literal);
+                command.push_str(&named_key(pane, "C-m").command.unwrap_or_default());
+            }
+            '\t' => {
+                flush_literal(&mut command, pane, &mut literal);
+                command.push_str(&named_key(pane, "Tab").command.unwrap_or_default());
+            }
+            '\u{8}' | '\u{7f}' => {
+                flush_literal(&mut command, pane, &mut literal);
+                command.push_str(&named_key(pane, "BSpace").command.unwrap_or_default());
+            }
+            _ if ch.is_control() => {
+                flush_literal(&mut command, pane, &mut literal);
+                if let Some(mapped) = raw_control_key(ch, pane) {
+                    command.push_str(&mapped.command.unwrap_or_default());
+                }
+            }
+            _ => literal.push(ch),
+        }
+    }
+
+    flush_literal(&mut command, pane, &mut literal);
+    command
+}
+
+fn flush_literal(command: &mut String, pane: Option<&str>, literal: &mut String) {
+    if literal.is_empty() {
+        return;
+    }
+    command.push_str(&literal_text(pane, literal));
+    literal.clear();
+}
+
 fn literal_key(pane: Option<&str>, ch: char) -> TmuxKey {
+    let command = literal_text(pane, &ch.to_string());
+
+    TmuxKey {
+        command: Some(command),
+        intent: KeyIntent::Printable(ch),
+    }
+}
+
+fn literal_text(pane: Option<&str>, text: &str) -> String {
     let mut command = String::from("send-keys ");
     if let Some(pane) = pane {
         command.push_str("-t ");
@@ -166,13 +223,9 @@ fn literal_key(pane: Option<&str>, ch: char) -> TmuxKey {
         command.push(' ');
     }
     command.push_str("-l -- ");
-    command.push_str(&quote_tmux_word(&ch.to_string()));
+    command.push_str(&quote_tmux_word(text));
     command.push('\n');
-
-    TmuxKey {
-        command: Some(command),
-        intent: KeyIntent::Printable(ch),
-    }
+    command
 }
 
 fn named_key(pane: Option<&str>, name: &str) -> TmuxKey {
@@ -403,6 +456,22 @@ mod tests {
 
         let ctrl_c = key_to_tmux(key(KeyCode::Char('\u{3}'), KeyModifiers::NONE), Some("%1"));
         assert_eq!(ctrl_c.command.as_deref(), Some("send-keys -t %1 C-c\n"));
+    }
+
+    #[test]
+    fn maps_paste_text() {
+        assert_eq!(
+            paste_to_tmux("echo hi\r\n", Some("%1")),
+            "send-keys -t %1 -l -- 'echo hi'\nsend-keys -t %1 C-m\n"
+        );
+    }
+
+    #[test]
+    fn maps_paste_controls() {
+        assert_eq!(
+            paste_to_tmux("ab\u{7f}\u{3}", None),
+            "send-keys -l -- 'ab'\nsend-keys BSpace\nsend-keys C-c\n"
+        );
     }
 
     #[test]

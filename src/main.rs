@@ -123,7 +123,11 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
                     transport.write_command(&tmux::resize_command(cols.max(1), rows.max(1)))?;
                     dirty = true;
                 }
-                Event::Paste(_) => {
+                Event::Paste(text) => {
+                    let command = tmux::paste_to_tmux(&text, active_pane.as_deref());
+                    if !command.is_empty() {
+                        transport.write_command(&command)?;
+                    }
                     predictor.clear();
                     dirty = true;
                 }
