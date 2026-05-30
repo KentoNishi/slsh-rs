@@ -1,0 +1,35 @@
+name: build binaries
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux x64
+            runner: ubuntu-latest
+            artifact: slsh-linux-x64
+            binary: target/release/slsh
+          - name: windows x64
+            runner: windows-latest
+            artifact: slsh-windows-x64
+            binary: target/release/slsh.exe
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.binary }}
+          if-no-files-found: error
