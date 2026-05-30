@@ -13,40 +13,58 @@ concurrency:
 jobs:
   prepare-release:
     name: prepare release
+    if: github.repository == 'KentoNishi/slsh-dev'
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.release.outputs.tag }}
     steps:
-      - name: Create empty release
+      - name: Prepare prerelease
         id: release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
-          if [[ "${GITHUB_REPOSITORY}" == "KentoNishi/slsh-dev" ]]; then
-            tag="dev-latest"
-            title="dev latest"
-            notes="Latest dev binary build from ${GITHUB_SHA}."
-          else
-            tag="manual-build-${GITHUB_RUN_NUMBER}"
-            title="manual build ${GITHUB_RUN_NUMBER}"
-            notes="Manual binary build from ${GITHUB_SHA}."
-          fi
+          tag="dev-latest"
+          title="dev latest"
+          notes="Latest dev binary build from ${GITHUB_SHA}."
 
-          gh release delete "${tag}" --repo "${GITHUB_REPOSITORY}" --yes --cleanup-tag 2>/dev/null || true
-          gh release create "${tag}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --title "${title}" \
-            --notes "${notes}" \
-            --target "${GITHUB_SHA}" \
-            --prerelease \
-            --latest=false
+          if gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" >/dev/null 2>&1; then
+              gh api \
+                --method PATCH \
+                "repos/${GITHUB_REPOSITORY}/git/refs/tags/${tag}" \
+                -f sha="${GITHUB_SHA}" \
+                -F force=true >/dev/null
+            else
+              gh api \
+                --method POST \
+                "repos/${GITHUB_REPOSITORY}/git/refs" \
+                -f ref="refs/tags/${tag}" \
+                -f sha="${GITHUB_SHA}" >/dev/null
+            fi
+
+            gh release edit "${tag}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "${title}" \
+              --notes "${notes}" \
+              --prerelease \
+              --latest=false
+          else
+            gh release create "${tag}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "${title}" \
+              --notes "${notes}" \
+              --target "${GITHUB_SHA}" \
+              --prerelease \
+              --latest=false
+          fi
 
           echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
 
   build:
     name: ${{ matrix.name }}
+    if: github.repository == 'KentoNishi/slsh-dev'
     runs-on: ${{ matrix.runner }}
     needs: prepare-release
     strategy:
@@ -86,21 +104,3 @@ jobs:
             "dist/${{ matrix.asset }}" \
             --repo "${GITHUB_REPOSITORY}" \
             --clobber
-
-  cleanup-failed-release:
-    name: cleanup failed release
-    runs-on: ubuntu-latest
-    needs:
-      - prepare-release
-      - build
-    if: failure()
-    steps:
-      - name: Delete partial release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          gh release delete "${{ needs.prepare-release.outputs.tag }}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --yes \
-            --cleanup-tag 2>/dev/null || true
