@@ -86,7 +86,7 @@ pub fn key_to_tmux(event: KeyEvent, pane: Option<&str>) -> TmuxKey {
 
     if let KeyCode::Char(ch) = event.code {
         match ch {
-            '\r' | '\n' => return named_key(pane, "Enter"),
+            '\r' | '\n' => return named_key(pane, "C-m"),
             '\t' => return named_key(pane, "Tab"),
             '\u{8}' | '\u{7f}' => {
                 return named_key(pane, "BSpace").with_intent(KeyIntent::Backspace);
@@ -112,7 +112,7 @@ pub fn key_to_tmux(event: KeyEvent, pane: Option<&str>) -> TmuxKey {
     match event.code {
         KeyCode::Char(ch) => literal_key(pane, ch),
         KeyCode::Backspace => named_key(pane, "BSpace").with_intent(KeyIntent::Backspace),
-        KeyCode::Enter => named_key(pane, "Enter"),
+        KeyCode::Enter => named_key(pane, "C-m"),
         KeyCode::Tab | KeyCode::BackTab => named_key(pane, "Tab"),
         KeyCode::Esc => named_key(pane, "Escape"),
         KeyCode::Left => named_key(pane, "Left"),
@@ -399,7 +399,7 @@ mod tests {
     #[test]
     fn maps_raw_control_bytes() {
         let enter = key_to_tmux(key(KeyCode::Char('\r'), KeyModifiers::NONE), Some("%1"));
-        assert_eq!(enter.command.as_deref(), Some("send-keys -t %1 Enter\n"));
+        assert_eq!(enter.command.as_deref(), Some("send-keys -t %1 C-m\n"));
 
         let ctrl_c = key_to_tmux(key(KeyCode::Char('\u{3}'), KeyModifiers::NONE), Some("%1"));
         assert_eq!(ctrl_c.command.as_deref(), Some("send-keys -t %1 C-c\n"));

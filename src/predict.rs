@@ -45,7 +45,7 @@ impl BasePredictor {
     pub fn on_key(&mut self, intent: KeyIntent, screen: &Screen) {
         match intent {
             KeyIntent::Printable(ch) => self.predict_printable(ch, screen),
-            KeyIntent::Backspace => self.predict_backspace(),
+            KeyIntent::Backspace => self.predict_backspace(screen),
             KeyIntent::TogglePrediction => self.toggle(),
             KeyIntent::Nonlinear | KeyIntent::Unsupported => self.clear(),
         }
@@ -115,15 +115,48 @@ impl BasePredictor {
         }
     }
 
-    fn predict_backspace(&mut self) {
-        if self.overlay.cells.pop().is_some() {
-            self.overlay.cursor = self.overlay.cells.last().map(|cell| Cursor {
-                row: cell.pos.row,
-                col: cell.pos.col + 1,
-            });
-        } else {
+    fn predict_backspace(&mut self, screen: &Screen) {
+        if !self.overlay.enabled || hidden_input_guard(screen) {
             self.clear();
+            return;
         }
+
+        let Some(target) = self.backspace_target(screen) else {
+            self.clear();
+            return;
+        };
+
+        if let Some(index) = self
+            .overlay
+            .cells
+            .iter()
+            .rposition(|cell| cell.pos == target)
+        {
+            self.overlay.cells.remove(index);
+            self.overlay.cursor = Some(target);
+            return;
+        }
+
+        let under = screen.cell(target);
+        if under.ch != ' ' {
+            self.overlay.cells.push(OverlayCell {
+                pos: target,
+                cell: Cell {
+                    ch: ' ',
+                    style: under.style,
+                },
+                under,
+            });
+        }
+        self.overlay.cursor = Some(target);
+    }
+
+    fn backspace_target(&self, screen: &Screen) -> Option<Cursor> {
+        let cursor = self.overlay.cursor.unwrap_or_else(|| screen.cursor());
+        (cursor.col > 0).then_some(Cursor {
+            row: cursor.row,
+            col: cursor.col - 1,
+        })
     }
 }
 
@@ -174,6 +207,55 @@ mod tests {
         predictor.on_key(KeyIntent::Backspace, &screen);
 
         assert!(predictor.overlay.cells.is_empty());
+    }
+
+    #[test]
+    fn backspace_hides_confirmed_cell() {
+        let screen = screen_with(b"abc");
+        let mut predictor = BasePredictor::new(true);
+
+        predictor.on_key(KeyIntent::Backspace, &screen);
+
+        assert_eq!(predictor.overlay.cells.len(), 1);
+        assert_eq!(predictor.overlay.cells[0].pos, Cursor { row: 0, col: 2 });
+        assert_eq!(predictor.overlay.cells[0].cell.ch, ' ');
+        assert_eq!(predictor.overlay.cells[0].under.ch, 'c');
+        assert_eq!(predictor.overlay.cursor, Some(Cursor { row: 0, col: 2 }));
+    }
+
+    #[test]
+    fn repeated_backspace_hides_confirmed_cells_in_order() {
+        let screen = screen_with(b"abc");
+        let mut predictor = BasePredictor::new(true);
+
+        predictor.on_key(KeyIntent::Backspace, &screen);
+        predictor.on_key(KeyIntent::Backspace, &screen);
+        predictor.on_key(KeyIntent::Backspace, &screen);
+
+        assert_eq!(
+            predictor
+                .overlay
+                .cells
+                .iter()
+                .map(|cell| cell.pos.col)
+                .collect::<Vec<_>>(),
+            vec![2, 1, 0]
+        );
+        assert_eq!(predictor.overlay.cursor, Some(Cursor { row: 0, col: 0 }));
+    }
+
+    #[test]
+    fn confirmed_remote_backspace_removes_deletion_overlay() {
+        let mut screen = screen_with(b"abc");
+        let mut predictor = BasePredictor::new(true);
+
+        predictor.on_key(KeyIntent::Backspace, &screen);
+        let mut parser = vte::Parser::new();
+        screen.feed(&mut parser, b"\x08 \x08");
+        predictor.reconcile(&screen);
+
+        assert!(predictor.overlay.cells.is_empty());
+        assert_eq!(predictor.overlay.cursor, None);
     }
 
     #[test]
