@@ -48,6 +48,7 @@ jobs:
               --repo "${GITHUB_REPOSITORY}" \
               --title "${title}" \
               --notes "${notes}" \
+              --target "${GITHUB_SHA}" \
               --prerelease \
               --latest=false
           else
