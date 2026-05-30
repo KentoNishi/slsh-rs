@@ -67,7 +67,6 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
     ssh_args.push(host.clone());
     ssh_args.push(launcher);
 
-    let _terminal = TerminalGuard::enter()?;
     let (cols, rows) = terminal::size().context("failed to read terminal size")?;
     let mut screen = Screen::new(Size {
         cols: cols.max(1),
@@ -77,6 +76,8 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
     let mut predictor = BasePredictor::new(parsed.slsh.predict);
     let mut renderer = Renderer::new();
     let mut transport = Transport::spawn(&ssh_args)?;
+    let mut pending_lines = wait_for_control_start(&mut transport)?;
+    let _terminal = TerminalGuard::enter()?;
     let mut active_pane: Option<String> = None;
     let mut stdout = io::stdout();
     let mut done = false;
@@ -84,7 +85,8 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
     while !done {
         let mut dirty = false;
 
-        for line in transport.drain_lines() {
+        pending_lines.extend(transport.drain_lines());
+        for line in pending_lines.drain(..) {
             match tmux::parse_control_line(&line) {
                 Some(ControlEvent::Output { pane, bytes }) => {
                     active_pane = Some(pane);
@@ -147,6 +149,22 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
     }
 
     Ok(exit_code(transport.wait()?))
+}
+
+fn wait_for_control_start(transport: &mut Transport) -> Result<Vec<String>> {
+    let mut pending = Vec::new();
+    loop {
+        for line in transport.drain_lines() {
+            if line.starts_with('%') {
+                pending.push(line);
+                return Ok(pending);
+            }
+        }
+        if let Some(status) = transport.try_wait()? {
+            anyhow::bail!("ssh exited before tmux control mode started with status {status}");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 fn command_session_name() -> String {
