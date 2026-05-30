@@ -44,6 +44,7 @@ def main() -> int:
         "256-color sgr output": b"\x1b[38;5;196mhot" in output,
         "dec special graphics output": "┌─┐".encode() in output,
         "enter key forwarded": b"send-keys" in control_input and b"Enter" in control_input,
+        "backspace key forwarded": b"send-keys" in control_input and b"BSpace" in control_input,
         "ctrl-c forwarded": b"send-keys" in control_input and b"C-c" in control_input,
         "left key forwarded": b"send-keys" in control_input and b"Left" in control_input,
         "tmux prompt/output rendered": b"bash" in output or b"#" in output or b"$" in output,
@@ -142,11 +143,11 @@ def run_slsh(env: dict[str, str]) -> bytes:
                 output += chunk
 
             if stage == "wait_prompt" and prompt_seen(output):
-                os.write(fd, b"xy\x1b[D\x03")
+                os.write(fd, b"xy\x7f\x1b[D\x03")
                 stage = "sent_shortcuts"
                 stage_at = time.time()
             elif stage == "sent_shortcuts" and time.time() - stage_at > 0.25:
-                os.write(fd, b"echo hello\r")
+                os.write(fd, b"echo hellx\x7fo\r")
                 stage = "wait_hello"
             elif stage == "wait_hello" and b"hello" in output:
                 os.write(fd, b"printf '\\033[31mred\\033[0m\\n'\r")

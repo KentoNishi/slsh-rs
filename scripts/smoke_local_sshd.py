@@ -211,7 +211,7 @@ def run_slsh(port: int, client_key: str, known_hosts: str) -> bytes:
                 output += chunk
 
             if stage == "wait_prompt" and prompt_seen(output):
-                os.write(fd, b"echo hello\r")
+                os.write(fd, b"echo hellx\x7fo\r")
                 stage = "wait_hello"
             elif stage == "wait_hello" and b"hello" in output:
                 os.write(fd, b"printf '\\033[31mred\\033[0m\\n'\r")
