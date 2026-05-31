@@ -30,6 +30,7 @@ def main() -> int:
         env = os.environ.copy()
         env["PATH"] = f"{tmp}{os.pathsep}{env['PATH']}"
         env["FAKE_SSH_LOG"] = fake_ssh_log
+        env["FAKE_SSH_SLOW_LOGIN"] = "1"
 
         startup_output = run_startup_slsh(env)
         output = run_slsh(env)
@@ -40,6 +41,7 @@ def main() -> int:
             control_input = b""
 
     startup_screen = reduce_terminal(startup_output)
+    output_screen = reduce_terminal(output)
     checks = {
         "startup stderr warning visible": "Warning fake ssh stderr" in startup_screen,
         "startup login preamble visible": "Welcome fake ssh login" in startup_screen,
@@ -53,7 +55,7 @@ def main() -> int:
         "backspace key forwarded": b"send-keys" in control_input and b"BSpace" in control_input,
         "ctrl-c forwarded": b"send-keys" in control_input and b"C-c" in control_input,
         "left key forwarded": b"send-keys" in control_input and b"Left" in control_input,
-        "login preamble rendered": b"Welcome fake ssh login" in output,
+        "login preamble rendered": "Welcome fake ssh login" in output_screen,
         "bootstrap command hidden": b"exec tmux -CC" not in output,
         "tmux prompt/output rendered": b"bash" in output or b"#" in output or b"$" in output,
     }
@@ -87,6 +89,7 @@ import os
 import pty
 import select
 import sys
+import time
 
 remote_command = sys.argv[-1] if "tmux -CC" in sys.argv[-1] else None
 log_path = os.environ.get("FAKE_SSH_LOG")
@@ -95,6 +98,8 @@ if pid == 0:
     if remote_command:
         os.execlp("bash", "bash", "-lc", remote_command)
     os.write(2, b"Warning fake ssh stderr\r\n")
+    if os.environ.get("FAKE_SSH_SLOW_LOGIN"):
+        time.sleep(1.0)
     os.write(1, b"Welcome fake ssh login\r\n")
     os.execlp("bash", "bash", "--noprofile", "--norc", "-i")
 

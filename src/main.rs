@@ -15,7 +15,7 @@ use crossterm::terminal;
 use input::InputEvent;
 use predict::BasePredictor;
 use render::Renderer;
-use screen::{Screen, Size};
+use screen::{Cursor, Screen, Size};
 use ssh_args::{LaunchMode, ParsedSshArgs};
 use std::collections::HashSet;
 use std::env;
@@ -113,6 +113,7 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
                         bootstrap.note_control();
                         active_pane = Some(pane);
                         input_ready = true;
+                        let bytes = bootstrap.prepare_first_output(&mut screen, &bytes);
                         screen.feed(&mut parser, &bytes);
                         predictor.reconcile(&screen);
                         dirty = true;
@@ -134,12 +135,13 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
         }
 
         if bootstrap.ready(&screen) {
-            if screen.cursor().col > 0 {
+            let anchor = (screen.cursor().col > 0).then(|| screen.cursor());
+            if anchor.is_some() {
                 screen.clear_cursor_row();
                 predictor.clear();
                 dirty = true;
             }
-            if let Some(command) = bootstrap.command() {
+            if let Some(command) = bootstrap.command(anchor) {
                 transport.write_command(&command)?;
             }
         }
@@ -233,6 +235,7 @@ struct LoginBootstrap {
     last_raw_at: Option<Instant>,
     sent: bool,
     suppress_raw: bool,
+    handoff: Option<Cursor>,
 }
 
 impl LoginBootstrap {
@@ -243,6 +246,7 @@ impl LoginBootstrap {
             last_raw_at: None,
             sent: false,
             suppress_raw: false,
+            handoff: None,
         }
     }
 
@@ -261,25 +265,54 @@ impl LoginBootstrap {
     }
 
     fn ready(&self, screen: &Screen) -> bool {
+        self.ready_at(screen, Instant::now())
+    }
+
+    fn ready_at(&self, screen: &Screen, now: Instant) -> bool {
         if self.launcher.is_none() || self.sent {
             return false;
         }
         if login_prompt_ready(screen) {
             return true;
         }
-        let elapsed = self.started_at.elapsed();
+        let elapsed = now.duration_since(self.started_at);
         match self.last_raw_at {
-            Some(last) => screen.cursor().col > 0 && last.elapsed() >= Duration::from_millis(750),
+            Some(last) => {
+                screen.cursor().col > 0
+                    && elapsed >= Duration::from_secs(8)
+                    && now.duration_since(last) >= Duration::from_secs(4)
+            }
             None => elapsed >= Duration::from_millis(1500),
         }
     }
 
-    fn command(&mut self) -> Option<String> {
+    fn command(&mut self, handoff: Option<Cursor>) -> Option<String> {
         let launcher = self.launcher.as_ref()?;
         self.sent = true;
         self.suppress_raw = true;
+        self.handoff = handoff.map(|cursor| Cursor {
+            row: cursor.row,
+            col: 0,
+        });
         Some(format!("exec {launcher}\n"))
     }
+
+    fn prepare_first_output(&mut self, screen: &mut Screen, bytes: &[u8]) -> Vec<u8> {
+        let Some(anchor) = self.handoff.take() else {
+            return bytes.to_vec();
+        };
+        screen.clear_from_row(anchor.row);
+        screen.set_cursor(anchor);
+        trim_handoff_newline(bytes).to_vec()
+    }
+}
+
+fn trim_handoff_newline(bytes: &[u8]) -> &[u8] {
+    bytes
+        .strip_prefix(b"\r\n")
+        .or_else(|| bytes.strip_prefix(b"\n"))
+        .or_else(|| bytes.strip_prefix(b"\r"))
+        .unwrap_or(bytes)
 }
 
 fn login_prompt_ready(screen: &Screen) -> bool {
@@ -356,5 +389,84 @@ impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = execute!(io::stdout(), Print("\x1b[?7h"), ResetColor, Show);
         let _ = terminal::disable_raw_mode();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn screen_with(bytes: &[u8]) -> Screen {
+        let mut screen = Screen::new(Size { cols: 80, rows: 6 });
+        let mut parser = vte::Parser::new();
+        screen.feed(&mut parser, bytes);
+        screen
+    }
+
+    fn prompt_lines(screen: &Screen) -> usize {
+        screen
+            .visible_text_tail(screen.size().rows)
+            .lines()
+            .filter(|line| line.trim_end().ends_with(['#', '$', '>']))
+            .count()
+    }
+
+    #[test]
+    fn bootstrap_does_not_cut_off_slow_login_banner() {
+        let start = Instant::now();
+        let screen = screen_with(b"Warning fake ssh stderr");
+        let bootstrap = LoginBootstrap {
+            launcher: Some("tmux -CC new-session -s test".into()),
+            started_at: start,
+            last_raw_at: Some(start + Duration::from_millis(10)),
+            sent: false,
+            suppress_raw: false,
+            handoff: None,
+        };
+
+        assert!(!bootstrap.ready_at(&screen, start + Duration::from_secs(1)));
+        assert!(!bootstrap.ready_at(&screen, start + Duration::from_secs(7)));
+        assert!(bootstrap.ready_at(&screen, start + Duration::from_secs(9)));
+    }
+
+    #[test]
+    fn bootstrap_starts_immediately_on_prompt() {
+        let start = Instant::now();
+        let screen = screen_with(b"Welcome\r\n(base) root@host:~# ");
+        let bootstrap = LoginBootstrap {
+            launcher: Some("tmux -CC new-session -s test".into()),
+            started_at: start,
+            last_raw_at: Some(start),
+            sent: false,
+            suppress_raw: false,
+            handoff: None,
+        };
+
+        assert!(bootstrap.ready_at(&screen, start + Duration::from_millis(50)));
+    }
+
+    #[test]
+    fn first_tmux_output_replaces_bootstrap_prompt_row() {
+        let mut screen = screen_with(b"Welcome\r\n(base) root@host:~# ");
+        let anchor = screen.cursor();
+        let mut parser = vte::Parser::new();
+        let mut bootstrap = LoginBootstrap::new(Some("tmux -CC new-session -s test".into()));
+
+        screen.clear_cursor_row();
+        bootstrap.command(Some(anchor));
+        let bytes = bootstrap.prepare_first_output(&mut screen, b"\r\n(base) root@host:~# ");
+        screen.feed(&mut parser, &bytes);
+
+        let text = screen.visible_text_tail(screen.size().rows);
+        assert!(text.contains("Welcome"));
+        assert_eq!(prompt_lines(&screen), 1, "{text}");
+    }
+
+    #[test]
+    fn handoff_trims_one_leading_newline() {
+        assert_eq!(trim_handoff_newline(b"\r\nprompt"), b"prompt");
+        assert_eq!(trim_handoff_newline(b"\nprompt"), b"prompt");
+        assert_eq!(trim_handoff_newline(b"\rprompt"), b"prompt");
+        assert_eq!(trim_handoff_newline(b"prompt"), b"prompt");
     }
 }

@@ -97,8 +97,9 @@ class ConptySmoke
     static int Main(string[] args)
     {
         bool selfTest = args.Length > 0 && args[0] == "--self-test";
-        string exe = selfTest ? Environment.GetEnvironmentVariable("COMSPEC") : (args.Length > 0 ? args[0] : "slsh.exe");
-        string commandLine = selfTest ? Quote(exe) + " /k" : Quote(exe) + " " + (args.Length > 1 ? args[1] : "wsl");
+        bool startupDump = args.Length > 0 && args[0] == "--startup-dump";
+        string exe = selfTest ? Environment.GetEnvironmentVariable("COMSPEC") : (args.Length > 0 ? args[startupDump ? 1 : 0] : "slsh.exe");
+        string commandLine = selfTest ? Quote(exe) + " /k" : Quote(exe) + " " + (args.Length > (startupDump ? 2 : 1) ? args[startupDump ? 2 : 1] : "wsl");
         string workdir = Path.GetDirectoryName(exe);
         string marker = selfTest ? "CONPTYSELFOK" : "SLSHCONPTYOK";
         string inputText = selfTest ? "echo CONPTYSELFOK\r" : "echo SLSHCONPTYx\x7fOK\r";
@@ -150,7 +151,8 @@ class ConptySmoke
         var output = new FileStream(new SafeFileHandle(outputRead, true), FileAccess.Read);
         var seen = new StringBuilder();
         bool sent = false;
-        bool startupChecked = selfTest;
+        bool startupChecked = selfTest || startupDump;
+        DateTime? startupSeenAt = null;
         DateTime sendAt = DateTime.UtcNow.AddSeconds(selfTest ? 1 : 3);
         DateTime deadline = DateTime.UtcNow.AddSeconds(selfTest ? 8 : 25);
         byte[] buffer = new byte[4096];
@@ -177,22 +179,39 @@ class ConptySmoke
             lock (seen) text = seen.ToString();
             if (!startupChecked && LooksLikePrompt(text))
             {
-                string screen = ReduceTerminal(text);
-                int prompts = PromptLineCount(screen);
-                if (screen.Contains("exec tmux -CC") || prompts > 1)
+                if (startupSeenAt == null) startupSeenAt = DateTime.UtcNow;
+                if (DateTime.UtcNow - startupSeenAt.Value >= TimeSpan.FromMilliseconds(1200))
+                {
+                    string screen;
+                    if (!StartupScreenOk(text, out screen))
+                    {
+                        TerminateProcess(pi.hProcess, 1);
+                        Console.Error.WriteLine("windows ConPTY startup screen failed");
+                        Console.Error.WriteLine("Screen:");
+                        Console.Error.WriteLine(screen);
+                        Console.Error.WriteLine("Captured:");
+                        Console.Error.WriteLine(text.Replace("\x1b", "<ESC>"));
+                        Cleanup(pi, attrList, hpc);
+                        return 1;
+                    }
+                    startupChecked = true;
+                }
+            }
+            if (startupDump && LooksLikePrompt(text))
+            {
+                if (startupSeenAt == null) startupSeenAt = DateTime.UtcNow;
+                if (DateTime.UtcNow - startupSeenAt.Value >= TimeSpan.FromMilliseconds(2000))
                 {
                     TerminateProcess(pi.hProcess, 1);
-                    Console.Error.WriteLine("windows ConPTY startup screen failed");
-                    Console.Error.WriteLine("Screen:");
-                    Console.Error.WriteLine(screen);
-                    Console.Error.WriteLine("Captured:");
-                    Console.Error.WriteLine(text.Replace("\x1b", "<ESC>"));
+                    Console.WriteLine("Screen:");
+                    Console.WriteLine(ReduceTerminal(text));
+                    Console.WriteLine("Captured:");
+                    Console.WriteLine(text.Replace("\x1b", "<ESC>"));
                     Cleanup(pi, attrList, hpc);
-                    return 1;
+                    return 0;
                 }
-                startupChecked = true;
             }
-            if (!sent && (startupChecked || DateTime.UtcNow >= sendAt))
+            if (!startupDump && !sent && (startupChecked || DateTime.UtcNow >= sendAt))
             {
                 Type(input, inputText);
                 sent = true;
@@ -271,6 +290,12 @@ class ConptySmoke
     }
 
     static bool LooksLikePrompt(string text) { return text.Contains("$ ") || text.Contains("# ") || text.Contains("> "); }
+
+    static bool StartupScreenOk(string text, out string screen)
+    {
+        screen = ReduceTerminal(text);
+        return !screen.Contains("exec tmux -CC") && PromptLineCount(screen) <= 1;
+    }
 
     static string ReduceTerminal(string text)
     {
