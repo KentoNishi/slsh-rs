@@ -243,6 +243,12 @@ class ConptySmoke
                 {
                     TerminateProcess(pi.hProcess, 1);
                     Console.Error.WriteLine("windows ConPTY exit failed");
+                    lock (seen) Console.Error.WriteLine(seen.ToString().Replace("\x1b", "<ESC>"));
+                    if (File.Exists(logPath))
+                    {
+                        Console.Error.WriteLine("Key log:");
+                        Console.Error.WriteLine(ReadShared(logPath));
+                    }
                     Cleanup(pi, attrList, hpc);
                     return 1;
                 }

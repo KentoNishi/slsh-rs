@@ -5,7 +5,7 @@ use std::io::{Read, Write};
 use std::process::ExitStatus as ProcessExitStatus;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const DEBUG_NETWORK_DELAY_ENV: &str = "SLSH_DELAY_MS";
 const LOOPBACK_ENV: &str = "SLSH_LOOPBACK";
@@ -18,6 +18,7 @@ pub struct Transport {
     reader_done: Receiver<()>,
     reader_finished: bool,
     exit_status: Option<ExitStatus>,
+    exit_drain_deadline: Option<Instant>,
     debug_network_delay: Duration,
 }
 
@@ -85,6 +86,7 @@ impl Transport {
             reader_done: done_rx,
             reader_finished: false,
             exit_status: None,
+            exit_drain_deadline: None,
             debug_network_delay,
         })
     }
@@ -115,24 +117,46 @@ impl Transport {
 
     pub fn try_wait(&mut self) -> Result<Option<ExitStatus>> {
         if self.exit_status.is_none() {
-            self.exit_status = self
+            if let Some(status) = self
                 .child
                 .try_wait()
-                .context("failed to poll transport child")?;
+                .context("failed to poll transport child")?
+            {
+                self.exit_status = Some(status);
+                self.exit_drain_deadline =
+                    Some(Instant::now() + self.debug_network_delay + Duration::from_millis(200));
+            }
         }
 
         if self.exit_status.is_some() && !self.reader_finished {
+            let mut reader_just_finished = false;
             match self.reader_done.try_recv() {
                 Ok(()) | Err(TryRecvError::Disconnected) => {
                     self.reader_finished = true;
+                    reader_just_finished = true;
                 }
                 Err(TryRecvError::Empty) => {}
             }
-            return Ok(None);
+            if reader_just_finished {
+                return Ok(None);
+            }
+            if !self.reader_finished && should_wait_for_reader(self.exit_drain_deadline) {
+                return Ok(None);
+            }
         }
 
         Ok(self.exit_status.take())
     }
+}
+
+#[cfg(windows)]
+fn should_wait_for_reader(deadline: Option<Instant>) -> bool {
+    deadline.is_none_or(|deadline| Instant::now() < deadline)
+}
+
+#[cfg(not(windows))]
+fn should_wait_for_reader(_deadline: Option<Instant>) -> bool {
+    true
 }
 
 pub fn std_exit_code(status: ProcessExitStatus) -> i32 {

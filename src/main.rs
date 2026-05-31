@@ -23,11 +23,13 @@ use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::{self, IsTerminal, Write};
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use transport::Transport;
 
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
+#[cfg(unix)]
+use std::time::Instant;
 
 fn main() {
     let code = match run() {
