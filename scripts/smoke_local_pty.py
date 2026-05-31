@@ -48,12 +48,17 @@ def main() -> int:
         "echo command output": b"hello" in output,
         "red sgr output": b"\x1b[31mred" in output,
         "256-color sgr output": b"\x1b[38;5;196mhot" in output,
-        "dec special graphics output": "┌─┐" in output_screen,
+        "dec special graphics output": dec_graphics_seen(output) or "┌─┐" in output_screen,
+        "alternate screen exit reset style": alternate_exit_reset_seen(output),
+        "alternate screen exit preserved scrollback": not alternate_exit_repaint_seen(output),
         "enter key forwarded": b"\r" in ssh_input,
         "backspace key forwarded": b"\x7f" in ssh_input,
         "ctrl-c forwarded": b"\x03" in ssh_input,
         "left key forwarded": b"\x1b[D" in ssh_input,
-        "login preamble rendered": "Welcome fake ssh login" in output_screen,
+        "ctrl-left key forwarded": b"\x1b[1;5D" in ssh_input,
+        "ctrl-right key forwarded": b"\x1b[1;5C" in ssh_input,
+        "ctrl-delete key forwarded": b"\x1b[3;5~" in ssh_input,
+        "login preamble captured": b"Welcome fake ssh login" in output,
         "prompt/output rendered": b"bash" in output or b"#" in output or b"$" in output,
     }
 
@@ -151,7 +156,7 @@ def run_slsh(env: dict[str, str]) -> bytes:
                 output += chunk
 
             if stage == "wait_prompt" and prompt_seen(output):
-                os.write(fd, b"xy\x7f\x1b[D\x03")
+                os.write(fd, b"xy\x7f\x1b[D\x1b[1;5D\x1b[1;5C\x1b[3;5~\x03")
                 stage = "sent_shortcuts"
                 stage_at = time.time()
             elif stage == "sent_shortcuts" and time.time() - stage_at > 0.25:
@@ -168,6 +173,12 @@ def run_slsh(env: dict[str, str]) -> bytes:
                 and b"\x1b[38;5;196mhot" in output
                 and "┌─┐" in reduce_terminal(output)
             ):
+                os.write(
+                    fd,
+                    b"printf '\\033[?1049h\\033[42m\\033[2JALT\\033[?1049l\\n'\r",
+                )
+                stage = "wait_alternate"
+            elif stage == "wait_alternate" and alternate_exit_reset_seen(output):
                 os.write(fd, b"exit\r")
                 return output
     finally:
@@ -314,6 +325,28 @@ def prompt_seen(output: bytes) -> bool:
 
 def prompt_line_count(screen: str) -> int:
     return sum(1 for line in screen.splitlines() if line.rstrip().endswith(("#", "$", ">")))
+
+
+def dec_graphics_seen(output: bytes) -> bool:
+    return (
+        "┌─┐".encode() in output
+        or b"\x1b(0lqk\x1b(B" in output
+        or b"\x1b)0\x0elqk\x0f" in output
+    )
+
+
+def alternate_exit_repaint_seen(output: bytes) -> bool:
+    exit_index = output.rfind(b"\x1b[?1049l")
+    if exit_index < 0:
+        return False
+    return b"\x1b[2J" in output[exit_index:]
+
+
+def alternate_exit_reset_seen(output: bytes) -> bool:
+    exit_index = output.rfind(b"\x1b[?1049l")
+    if exit_index < 0:
+        return False
+    return b"\x1b[0m" in output[exit_index:]
 
 
 if __name__ == "__main__":

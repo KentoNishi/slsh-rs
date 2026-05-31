@@ -25,6 +25,7 @@ pub enum Color {
 pub struct Style {
     pub fg: Color,
     pub bg: Color,
+    pub dim: bool,
     pub bold: bool,
     pub underline: bool,
     pub reverse: bool,
@@ -105,9 +106,12 @@ impl Screen {
         self.style
     }
 
-    #[cfg(test)]
     pub fn active(&self) -> ActiveBuffer {
         self.active
+    }
+
+    pub fn reset_style(&mut self) {
+        self.style = Style::default();
     }
 
     pub fn cell(&self, cursor: Cursor) -> Cell {
@@ -357,9 +361,13 @@ impl Screen {
             match code {
                 0 => self.style = Style::default(),
                 1 => self.style.bold = true,
+                2 => self.style.dim = true,
                 4 => self.style.underline = true,
                 7 => self.style.reverse = true,
-                22 => self.style.bold = false,
+                22 => {
+                    self.style.bold = false;
+                    self.style.dim = false;
+                }
                 24 => self.style.underline = false,
                 27 => self.style.reverse = false,
                 30..=37 => self.style.fg = Color::Indexed((code - 30) as u8),
@@ -796,13 +804,14 @@ mod tests {
     fn tracks_basic_style() {
         let mut screen = Screen::new(Size { cols: 3, rows: 1 });
 
-        feed(&mut screen, b"\x1b[31;1mA\x1b[0mB");
+        feed(&mut screen, b"\x1b[31;1;2mA\x1b[0mB");
 
         assert_eq!(
             screen.cell(Cursor { row: 0, col: 0 }).style,
             Style {
                 fg: Color::Indexed(1),
                 bold: true,
+                dim: true,
                 ..Style::default()
             }
         );

@@ -173,6 +173,9 @@ fn move_cursor(out: &mut String, cursor: Cursor) {
 
 fn set_style(out: &mut String, style: Style) {
     out.push_str("\x1b[0m");
+    if style.dim {
+        out.push_str("\x1b[2m");
+    }
     if style.bold {
         out.push_str("\x1b[1m");
     }
@@ -268,6 +271,23 @@ mod tests {
 
         assert!(out.contains("\x1b[38;5;196mA"));
         assert!(out.contains("\x1b[48;2;10;20;30mB"));
+    }
+
+    #[test]
+    fn render_emits_dim_style() {
+        let screen = screen_with(b"\x1b[2mD");
+        let mut renderer = Renderer::new();
+
+        let out = renderer.render(
+            &screen,
+            &Overlay {
+                enabled: true,
+                cells: Vec::new(),
+                cursor: None,
+            },
+        );
+
+        assert!(out.contains("\x1b[2mD"));
     }
 
     #[test]

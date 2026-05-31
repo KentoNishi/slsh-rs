@@ -67,7 +67,7 @@ impl BasePredictor {
         let mut kept = Vec::new();
         for cell in &self.overlay.cells {
             let confirmed = screen.cell(cell.pos);
-            if confirmed == cell.cell {
+            if confirmed == cell.cell || confirmed_matches_prediction(confirmed, cell.cell) {
                 continue;
             }
             if confirmed != cell.under {
@@ -82,6 +82,7 @@ impl BasePredictor {
             self.overlay.cursor = None;
         }
         self.validate_owned_span(screen);
+        self.validate_remote_cursor(screen);
     }
 
     fn predict_printable(&mut self, ch: char, screen: &Screen) {
@@ -115,7 +116,7 @@ impl BasePredictor {
         let under = screen.cell(cursor);
         let cell = Cell {
             ch,
-            style: under.style,
+            style: predicted_style(under.style),
         };
         self.overlay.cells.push(OverlayCell {
             pos: cursor,
@@ -172,7 +173,7 @@ impl BasePredictor {
                 pos: target,
                 cell: Cell {
                     ch: ' ',
-                    style: under.style,
+                    style: predicted_style(under.style),
                 },
                 under,
             });
@@ -209,7 +210,8 @@ impl BasePredictor {
             {
                 continue;
             }
-            if screen.cell(owned.pos) != owned.cell {
+            let confirmed = screen.cell(owned.pos);
+            if confirmed != owned.cell && !confirmed_matches_prediction(confirmed, owned.cell) {
                 self.clear();
                 return;
             }
@@ -224,6 +226,19 @@ impl BasePredictor {
             && !self.owned.is_empty()
             && self.expected_cursor(screen) != screen.cursor()
         {
+            self.clear();
+        }
+    }
+
+    fn validate_remote_cursor(&mut self, screen: &Screen) {
+        if self.overlay.cells.is_empty() {
+            return;
+        }
+
+        let cursor = screen.cursor();
+        let at_overlay_cursor = self.overlay.cursor == Some(cursor);
+        let at_pending_cell = self.overlay.cells.iter().any(|cell| cell.pos == cursor);
+        if !at_overlay_cursor && !at_pending_cell {
             self.clear();
         }
     }
@@ -253,6 +268,17 @@ fn advance_cursor(screen: &Screen, cursor: Cursor, width: u16) -> Cursor {
 
 fn width_of(ch: char) -> u16 {
     UnicodeWidthChar::width(ch).unwrap_or(0) as u16
+}
+
+fn predicted_style(mut style: crate::screen::Style) -> crate::screen::Style {
+    style.dim = true;
+    style
+}
+
+fn confirmed_matches_prediction(confirmed: Cell, predicted: Cell) -> bool {
+    let mut predicted_confirmed_style = predicted.style;
+    predicted_confirmed_style.dim = false;
+    confirmed.ch == predicted.ch && confirmed.style == predicted_confirmed_style
 }
 
 pub fn hidden_input_guard(screen: &Screen) -> bool {
@@ -296,6 +322,7 @@ mod tests {
         assert_eq!(predictor.overlay.cells.len(), 1);
         assert_eq!(predictor.overlay.cells[0].pos, Cursor { row: 0, col: 2 });
         assert_eq!(predictor.overlay.cells[0].cell.ch, 'a');
+        assert!(predictor.overlay.cells[0].cell.style.dim);
     }
 
     #[test]
@@ -454,6 +481,32 @@ mod tests {
         predictor.reconcile(&screen);
 
         assert_eq!(predictor.overlay.cells.len(), 1);
+    }
+
+    #[test]
+    fn remote_cursor_jump_clears_unconfirmed_overlay() {
+        let mut screen = screen_with(b"$ ");
+        let mut predictor = BasePredictor::new(true);
+
+        predictor.on_key(KeyIntent::Printable('d'), &screen);
+        feed(&mut screen, b"\x1b[2;1H");
+        predictor.reconcile(&screen);
+
+        assert!(predictor.overlay.cells.is_empty());
+    }
+
+    #[test]
+    fn partial_remote_echo_keeps_remaining_overlay() {
+        let mut screen = screen_with(b"$ ");
+        let mut predictor = BasePredictor::new(true);
+
+        predictor.on_key(KeyIntent::Printable('a'), &screen);
+        predictor.on_key(KeyIntent::Printable('b'), &screen);
+        feed(&mut screen, b"a");
+        predictor.reconcile(&screen);
+
+        assert_eq!(predictor.overlay.cells.len(), 1);
+        assert_eq!(predictor.overlay.cells[0].cell.ch, 'b');
     }
 
     #[test]

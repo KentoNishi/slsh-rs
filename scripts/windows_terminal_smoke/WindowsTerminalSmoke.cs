@@ -53,6 +53,7 @@ class WindowsTerminalSmoke
         string backspaceWrongMarker = backspaceMarker + "x";
         string cancelledMarker = "/tmp/slsh-wt-cancelled-" + stamp;
         string ctrlMarker = "/tmp/slsh-wt-ctrl-" + stamp;
+        string keyMarker = "/tmp/slsh-wt-keys-" + stamp;
         string renderMarker = "/tmp/slsh-wt-render-" + stamp;
         string logPath = Path.Combine(Path.GetTempPath(), "slsh-wt-smoke-" + stamp + ".log");
         string ssh = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "System32", "OpenSSH", "ssh.exe");
@@ -64,7 +65,7 @@ class WindowsTerminalSmoke
             if (File.Exists(tracePath)) File.Delete(tracePath);
             Trace("start");
             RunChecked(ssh, SshArgs(host,
-                "rm -f '" + backspaceMarker + "' '" + backspaceWrongMarker + "' '" + cancelledMarker + "' '" + ctrlMarker + "' '" + renderMarker + "'"
+                "rm -f '" + backspaceMarker + "' '" + backspaceWrongMarker + "' '" + cancelledMarker + "' '" + ctrlMarker + "' '" + keyMarker + "' '" + renderMarker + "'"
             ), "prepare markers");
             Trace("prepared markers");
 
@@ -93,6 +94,18 @@ class WindowsTerminalSmoke
                 RequireRemoteFile(ssh, host, ctrlMarker, 40, "ctrl-c followup marker");
                 RequireMissingRemoteFile(ssh, host, cancelledMarker, "ctrl-c cancelled marker");
                 Trace("ctrl-c passed");
+
+                Text("cat > " + keyMarker);
+                Enter();
+                Thread.Sleep(500);
+                CtrlLeft();
+                CtrlRight();
+                CtrlDelete();
+                Enter();
+                CtrlD();
+                RequireRemoteFile(ssh, host, keyMarker, 40, "modified key marker");
+                RequireRemoteModifiedKeyBytes(ssh, host, keyMarker);
+                Trace("modified keys passed");
 
                 Text("printf '\\033[31mSLSHWT%s\\033[0m\\n\\033)0\\016lqk\\017\\n' RED; touch " + renderMarker);
                 Enter();
@@ -141,6 +154,26 @@ class WindowsTerminalSmoke
         Key(0x43, 0x2E, '\x03', LEFT_CTRL_PRESSED);
     }
 
+    static void CtrlD()
+    {
+        Key(0x44, 0x20, '\x04', LEFT_CTRL_PRESSED);
+    }
+
+    static void CtrlLeft()
+    {
+        Key(0x25, 0x4B, '\0', LEFT_CTRL_PRESSED);
+    }
+
+    static void CtrlRight()
+    {
+        Key(0x27, 0x4D, '\0', LEFT_CTRL_PRESSED);
+    }
+
+    static void CtrlDelete()
+    {
+        Key(0x2E, 0x53, '\0', LEFT_CTRL_PRESSED);
+    }
+
     static void Key(ushort vk, ushort scan, char ch)
     {
         Key(vk, scan, ch, 0);
@@ -181,6 +214,13 @@ class WindowsTerminalSmoke
     {
         if (Run(ssh, SshArgs(host, "test ! -e '" + path + "'")) != 0)
             throw new InvalidOperationException(label + " unexpectedly exists: " + path);
+    }
+
+    static void RequireRemoteModifiedKeyBytes(string ssh, string host, string path)
+    {
+        string command = "python3 -c \"import pathlib,sys; data=pathlib.Path('" + path + "').read_bytes(); esc=bytes([27]); expected=esc+b'[1;5D'+esc+b'[1;5C'+esc+b'[3;5~'; sys.exit(0 if expected in data else 1)\"";
+        if (Run(ssh, SshArgs(host, command)) != 0)
+            throw new InvalidOperationException("modified key bytes missing from " + path);
     }
 
     static void WriteResult(string resultPath, string header, string logPath)
