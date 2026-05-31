@@ -74,10 +74,14 @@ jobs:
         include:
           - name: linux x64
             runner: ubuntu-latest
-            binary: target/release/slsh
+            build_args: --target x86_64-unknown-linux-musl
+            rust_target: x86_64-unknown-linux-musl
+            binary: target/x86_64-unknown-linux-musl/release/slsh
             asset: slsh
           - name: windows x64
             runner: windows-latest
+            build_args: ""
+            rust_target: ""
             binary: target/release/slsh.exe
             asset: slsh.exe
 
@@ -85,8 +89,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Install Rust target
+        if: matrix.rust_target != ''
+        run: rustup target add ${{ matrix.rust_target }}
+
       - name: Build release binary
-        run: cargo build --release --locked
+        run: cargo build --release --locked ${{ matrix.build_args }}
 
       - name: Stage binary
         shell: bash
