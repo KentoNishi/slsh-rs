@@ -194,6 +194,7 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
 
         if dirty {
             let output = renderer.render(&screen, &predictor.overlay);
+            key_trace.log(format_args!("render bytes {}", output.len()));
             stdout
                 .write_all(output.as_bytes())
                 .context("failed to render terminal")?;
