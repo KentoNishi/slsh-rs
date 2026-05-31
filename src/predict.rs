@@ -92,7 +92,7 @@ impl BasePredictor {
                 }
                 continue;
             }
-            if printable_prediction_confirmed(cell, confirmed, screen) {
+            if printable_prediction_confirmed(cell, confirmed, screen, !kept.is_empty()) {
                 continue;
             }
             if confirmed != cell.under {
@@ -392,7 +392,12 @@ fn confirmed_matches_prediction(confirmed: Cell, predicted: Cell) -> bool {
     confirmed.ch == predicted.ch && confirmed.style == predicted_confirmed_style
 }
 
-fn printable_prediction_confirmed(cell: OverlayCell, confirmed: Cell, screen: &Screen) -> bool {
+fn printable_prediction_confirmed(
+    cell: OverlayCell,
+    confirmed: Cell,
+    screen: &Screen,
+    prior_pending: bool,
+) -> bool {
     if !is_printable_prediction(cell) {
         return false;
     }
@@ -400,6 +405,9 @@ fn printable_prediction_confirmed(cell: OverlayCell, confirmed: Cell, screen: &S
         return false;
     }
     if cell.cell.ch == ' ' && confirmed == cell.under {
+        if prior_pending {
+            return false;
+        }
         return cursor_reached(
             screen.cursor(),
             advance_cursor(screen, cell.pos, width_of(cell.cell.ch)),
@@ -946,6 +954,41 @@ mod tests {
                 .map(|cell| cell.cell.ch)
                 .collect::<String>(),
             "ow more"
+        );
+        assert!(!predictor.overlay.cells.is_empty());
+    }
+
+    #[test]
+    fn long_divergent_edit_survives_remote_catchup() {
+        let mut screen = screen_with_size(Size { cols: 80, rows: 5 }, b"$ ");
+        let mut predictor = BasePredictor::new(true);
+        let typed = "test phrase typing another typo word nyow";
+
+        for ch in typed.chars() {
+            predictor.on_key(KeyIntent::Printable(ch), &screen);
+        }
+        for _ in 0..3 {
+            predictor.on_key(KeyIntent::Backspace, &screen);
+        }
+        for ch in "ow and keep going".chars() {
+            predictor.on_key(KeyIntent::Printable(ch), &screen);
+        }
+
+        feed_each_reconcile(&mut screen, &mut predictor, typed.as_bytes());
+
+        assert!(!predictor.overlay.cells.is_empty());
+
+        feed_each_reconcile(&mut screen, &mut predictor, b"\x08 \x08\x08 \x08\x08 \x08");
+
+        assert_eq!(
+            predictor
+                .overlay
+                .cells
+                .iter()
+                .filter(|cell| cell.kind == OverlayKind::Printable)
+                .map(|cell| cell.cell.ch)
+                .collect::<String>(),
+            "ow and keep going"
         );
         assert!(!predictor.overlay.cells.is_empty());
     }
