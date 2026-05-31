@@ -85,6 +85,8 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
     let mut key_trace = KeyTrace::from_env();
     let mut pressed_keys = HashSet::new();
     let mut raw_synced = true;
+    #[cfg(not(windows))]
+    let mut mouse_protocol = key::MouseProtocol::default();
 
     loop {
         let mut dirty = false;
@@ -93,6 +95,8 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
             let before_active = screen.active();
             let before_application_cursor = screen.application_cursor_keys();
             screen.feed(&mut parser, &chunk);
+            #[cfg(not(windows))]
+            mouse_protocol.feed(&chunk);
             predictor.reconcile(&screen);
             let left_alternate = (before_active == ActiveBuffer::Alternate
                 && screen.active() == ActiveBuffer::Primary)
@@ -180,7 +184,7 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
                 }
                 #[cfg(not(windows))]
                 Some(InputEvent::Mouse(mouse)) => {
-                    let bytes = key::encode_mouse(mouse);
+                    let bytes = key::encode_mouse(mouse, mouse_protocol);
                     key_trace.log(format_args!("mouse {:?} bytes {:?}", mouse, bytes));
                     if !bytes.is_empty() {
                         transport.write(&bytes)?;
