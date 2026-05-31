@@ -77,6 +77,10 @@ fn full_draw(frame: &Frame) -> String {
 }
 
 fn diff_draw(last: &Frame, next: &Frame) -> String {
+    if last == next {
+        return String::new();
+    }
+
     let mut out = String::new();
     for row in 0..next.size.rows {
         let mut col = 0;
@@ -345,6 +349,22 @@ mod tests {
         assert!(out.contains("\x1b[1;2H"));
         assert!(out.contains('a'));
         assert!(!out.contains("ha"));
+    }
+
+    #[test]
+    fn unchanged_frame_emits_nothing() {
+        let mut renderer = Renderer::new();
+        let screen = screen_with(b"hi");
+        let overlay = Overlay {
+            enabled: true,
+            cells: Vec::new(),
+            cursor: Some(Cursor { row: 0, col: 2 }),
+        };
+
+        renderer.render(&screen, &overlay);
+        let out = renderer.render(&screen, &overlay);
+
+        assert!(out.is_empty());
     }
 
     #[test]
