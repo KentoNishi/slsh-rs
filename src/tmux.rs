@@ -23,8 +23,8 @@ pub struct TmuxKey {
     pub intent: KeyIntent,
 }
 
-pub fn persistent_launcher() -> String {
-    "tmux -CC new-session -A -s slsh".to_string()
+pub fn shell_launcher(session_name: &str) -> String {
+    format!("tmux -CC new-session -s {}", quote_tmux_word(session_name))
 }
 
 pub fn command_launcher(session_name: &str, remote_command: &[String]) -> String {
@@ -370,7 +370,10 @@ mod tests {
 
     #[test]
     fn builds_launchers() {
-        assert_eq!(persistent_launcher(), "tmux -CC new-session -A -s slsh");
+        assert_eq!(
+            shell_launcher("slsh-shell-1"),
+            "tmux -CC new-session -s 'slsh-shell-1'"
+        );
         assert_eq!(
             command_launcher(
                 "slsh-cmd-1",

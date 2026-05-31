@@ -109,14 +109,7 @@ while True:
 
 
 def run_slsh(env: dict[str, str]) -> bytes:
-    argv = [
-        os.path.join(ROOT, "target", "debug", "slsh"),
-        "fakehost",
-        "bash",
-        "--noprofile",
-        "--norc",
-        "-i",
-    ]
+    argv = [os.path.join(ROOT, "target", "debug", "slsh"), "fakehost"]
 
     pid, fd = pty.fork()
     if pid == 0:
