@@ -15,7 +15,7 @@ pub struct EncodedKey {
     pub intent: KeyIntent,
 }
 
-pub fn encode_key(event: KeyEvent) -> EncodedKey {
+pub fn encode_key_with_mode(event: KeyEvent, application_cursor_keys: bool) -> EncodedKey {
     let modifiers = event.modifiers;
 
     if matches!(event.code, KeyCode::Char('g' | 'G')) && modifiers == KeyModifiers::CONTROL {
@@ -61,10 +61,10 @@ pub fn encode_key(event: KeyEvent) -> EncodedKey {
                 bytes(vec![0x1b], KeyIntent::Nonlinear)
             }
         }
-        KeyCode::Left => csi_key('D', modifiers),
-        KeyCode::Right => csi_key('C', modifiers),
-        KeyCode::Up => csi_key('A', modifiers),
-        KeyCode::Down => csi_key('B', modifiers),
+        KeyCode::Left => cursor_key('D', modifiers, application_cursor_keys),
+        KeyCode::Right => cursor_key('C', modifiers, application_cursor_keys),
+        KeyCode::Up => cursor_key('A', modifiers, application_cursor_keys),
+        KeyCode::Down => cursor_key('B', modifiers, application_cursor_keys),
         KeyCode::Delete => tilde_key(3, modifiers),
         KeyCode::Insert => tilde_key(2, modifiers),
         KeyCode::Home => csi_key('H', modifiers),
@@ -144,6 +144,20 @@ fn csi_key(final_byte: char, modifiers: KeyModifiers) -> EncodedKey {
         None => format!("\x1b[{final_byte}"),
     };
     bytes(sequence.into_bytes(), KeyIntent::Nonlinear)
+}
+
+fn cursor_key(
+    final_byte: char,
+    modifiers: KeyModifiers,
+    application_cursor_keys: bool,
+) -> EncodedKey {
+    if application_cursor_keys && xterm_modifier(modifiers).is_none() {
+        return bytes(
+            format!("\x1bO{final_byte}").into_bytes(),
+            KeyIntent::Nonlinear,
+        );
+    }
+    csi_key(final_byte, modifiers)
 }
 
 fn tilde_key(number: u8, modifiers: KeyModifiers) -> EncodedKey {
@@ -241,9 +255,13 @@ mod tests {
         }
     }
 
+    fn enc(code: KeyCode, modifiers: KeyModifiers) -> EncodedKey {
+        encode_key_with_mode(key(code, modifiers), false)
+    }
+
     #[test]
     fn encodes_printable_key() {
-        let encoded = encode_key(key(KeyCode::Char('x'), KeyModifiers::NONE));
+        let encoded = enc(KeyCode::Char('x'), KeyModifiers::NONE);
 
         assert_eq!(encoded.bytes, b"x");
         assert_eq!(encoded.intent, KeyIntent::Printable('x'));
@@ -251,112 +269,107 @@ mod tests {
 
     #[test]
     fn encodes_enter_backspace_and_ctrl() {
+        assert_eq!(enc(KeyCode::Enter, KeyModifiers::NONE).bytes, b"\r");
+        assert_eq!(enc(KeyCode::Backspace, KeyModifiers::NONE).bytes, &[0x7f]);
         assert_eq!(
-            encode_key(key(KeyCode::Enter, KeyModifiers::NONE)).bytes,
-            b"\r"
-        );
-        assert_eq!(
-            encode_key(key(KeyCode::Backspace, KeyModifiers::NONE)).bytes,
-            &[0x7f]
-        );
-        assert_eq!(
-            encode_key(key(KeyCode::Char('c'), KeyModifiers::CONTROL)).bytes,
+            enc(KeyCode::Char('c'), KeyModifiers::CONTROL).bytes,
             &[0x03]
         );
         assert_eq!(
-            encode_key(key(KeyCode::Char('\u{18}'), KeyModifiers::NONE)).bytes,
+            enc(KeyCode::Char('\u{18}'), KeyModifiers::NONE).bytes,
             &[0x18]
         );
     }
 
     #[test]
     fn encodes_cursor_keys() {
+        assert_eq!(enc(KeyCode::Left, KeyModifiers::NONE).bytes, b"\x1b[D");
+        assert_eq!(enc(KeyCode::Delete, KeyModifiers::NONE).bytes, b"\x1b[3~");
+    }
+
+    #[test]
+    fn encodes_application_cursor_keys() {
         assert_eq!(
-            encode_key(key(KeyCode::Left, KeyModifiers::NONE)).bytes,
-            b"\x1b[D"
+            encode_key_with_mode(key(KeyCode::Up, KeyModifiers::NONE), true).bytes,
+            b"\x1bOA"
         );
         assert_eq!(
-            encode_key(key(KeyCode::Delete, KeyModifiers::NONE)).bytes,
-            b"\x1b[3~"
+            encode_key_with_mode(key(KeyCode::Down, KeyModifiers::NONE), true).bytes,
+            b"\x1bOB"
+        );
+        assert_eq!(
+            encode_key_with_mode(key(KeyCode::Up, KeyModifiers::CONTROL), true).bytes,
+            b"\x1b[1;5A"
         );
     }
 
     #[test]
     fn encodes_modified_navigation_keys() {
         assert_eq!(
-            encode_key(key(KeyCode::Left, KeyModifiers::CONTROL)).bytes,
+            enc(KeyCode::Left, KeyModifiers::CONTROL).bytes,
             b"\x1b[1;5D"
         );
         assert_eq!(
-            encode_key(key(
-                KeyCode::Right,
-                KeyModifiers::SHIFT | KeyModifiers::ALT | KeyModifiers::CONTROL
-            ))
+            encode_key_with_mode(
+                key(
+                    KeyCode::Right,
+                    KeyModifiers::SHIFT | KeyModifiers::ALT | KeyModifiers::CONTROL
+                ),
+                false
+            )
             .bytes,
             b"\x1b[1;8C"
         );
         assert_eq!(
-            encode_key(key(KeyCode::Delete, KeyModifiers::CONTROL)).bytes,
+            enc(KeyCode::Delete, KeyModifiers::CONTROL).bytes,
             b"\x1b[3;5~"
         );
+        assert_eq!(enc(KeyCode::Home, KeyModifiers::ALT).bytes, b"\x1b[1;3H");
         assert_eq!(
-            encode_key(key(KeyCode::Home, KeyModifiers::ALT)).bytes,
-            b"\x1b[1;3H"
-        );
-        assert_eq!(
-            encode_key(key(KeyCode::KeypadBegin, KeyModifiers::CONTROL)).bytes,
+            enc(KeyCode::KeypadBegin, KeyModifiers::CONTROL).bytes,
             b"\x1b[1;5E"
         );
     }
 
     #[test]
     fn encodes_modified_function_keys() {
+        assert_eq!(enc(KeyCode::F(1), KeyModifiers::NONE).bytes, b"\x1bOP");
         assert_eq!(
-            encode_key(key(KeyCode::F(1), KeyModifiers::NONE)).bytes,
-            b"\x1bOP"
-        );
-        assert_eq!(
-            encode_key(key(KeyCode::F(1), KeyModifiers::CONTROL)).bytes,
+            enc(KeyCode::F(1), KeyModifiers::CONTROL).bytes,
             b"\x1b[1;5P"
         );
-        assert_eq!(
-            encode_key(key(KeyCode::F(5), KeyModifiers::ALT)).bytes,
-            b"\x1b[15;3~"
-        );
-        assert_eq!(
-            encode_key(key(KeyCode::F(13), KeyModifiers::NONE)).bytes,
-            b"\x1b[1;2P"
-        );
+        assert_eq!(enc(KeyCode::F(5), KeyModifiers::ALT).bytes, b"\x1b[15;3~");
+        assert_eq!(enc(KeyCode::F(13), KeyModifiers::NONE).bytes, b"\x1b[1;2P");
     }
 
     #[test]
     fn preserves_alt_modified_text_and_controls() {
+        assert_eq!(enc(KeyCode::Char('x'), KeyModifiers::ALT).bytes, b"\x1bx");
         assert_eq!(
-            encode_key(key(KeyCode::Char('x'), KeyModifiers::ALT)).bytes,
-            b"\x1bx"
-        );
-        assert_eq!(
-            encode_key(key(
-                KeyCode::Char('c'),
-                KeyModifiers::ALT | KeyModifiers::CONTROL
-            ))
+            encode_key_with_mode(
+                key(
+                    KeyCode::Char('c'),
+                    KeyModifiers::ALT | KeyModifiers::CONTROL
+                ),
+                false
+            )
             .bytes,
             &[0x1b, 0x03]
         );
         assert_eq!(
-            encode_key(key(KeyCode::Enter, KeyModifiers::CONTROL)).bytes,
+            enc(KeyCode::Enter, KeyModifiers::CONTROL).bytes,
             b"\x1b[27;5;13~"
         );
     }
 
     #[test]
     fn ctrl_g_toggles_prediction_locally() {
-        let encoded = encode_key(key(KeyCode::Char('g'), KeyModifiers::CONTROL));
+        let encoded = enc(KeyCode::Char('g'), KeyModifiers::CONTROL);
 
         assert_eq!(encoded.intent, KeyIntent::TogglePrediction);
         assert!(encoded.bytes.is_empty());
 
-        let encoded = encode_key(key(KeyCode::Char('\u{7}'), KeyModifiers::NONE));
+        let encoded = enc(KeyCode::Char('\u{7}'), KeyModifiers::NONE);
 
         assert_eq!(encoded.intent, KeyIntent::TogglePrediction);
         assert!(encoded.bytes.is_empty());

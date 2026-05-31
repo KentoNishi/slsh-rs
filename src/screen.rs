@@ -67,6 +67,7 @@ pub struct Screen {
     g0_dec_special_graphics: bool,
     g1_dec_special_graphics: bool,
     using_g1: bool,
+    application_cursor_keys: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -91,6 +92,7 @@ impl Screen {
             g0_dec_special_graphics: false,
             g1_dec_special_graphics: false,
             using_g1: false,
+            application_cursor_keys: false,
         }
     }
 
@@ -112,6 +114,10 @@ impl Screen {
 
     pub fn reset_style(&mut self) {
         self.style = Style::default();
+    }
+
+    pub fn application_cursor_keys(&self) -> bool {
+        self.application_cursor_keys
     }
 
     pub fn cell(&self, cursor: Cursor) -> Cell {
@@ -528,10 +534,16 @@ impl Perform for Screen {
                 if has_private_mode(params, &[47, 1047, 1049]) {
                     self.set_alternate(true);
                 }
+                if has_private_mode(params, &[1]) {
+                    self.application_cursor_keys = true;
+                }
             }
             'l' if intermediates == b"?" => {
                 if has_private_mode(params, &[47, 1047, 1049]) {
                     self.set_alternate(false);
+                }
+                if has_private_mode(params, &[1]) {
+                    self.application_cursor_keys = false;
                 }
             }
             _ => {}
@@ -873,6 +885,17 @@ mod tests {
 
         assert_eq!(screen.active(), ActiveBuffer::Primary);
         assert_eq!(screen.cell(Cursor { row: 0, col: 0 }).ch, 'm');
+    }
+
+    #[test]
+    fn tracks_application_cursor_key_mode() {
+        let mut screen = Screen::new(Size { cols: 3, rows: 1 });
+
+        feed(&mut screen, b"\x1b[?1h");
+        assert!(screen.application_cursor_keys());
+
+        feed(&mut screen, b"\x1b[?1l");
+        assert!(!screen.application_cursor_keys());
     }
 
     #[test]
