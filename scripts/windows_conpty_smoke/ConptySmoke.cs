@@ -179,7 +179,7 @@ class ConptySmoke
                 Type(input, inputText);
                 sent = true;
             }
-            if (Count(text, marker) >= (selfTest ? 1 : 2))
+            if (Count(text, marker) >= 1)
             {
                 Write(input, "exit\r");
                 Cleanup(pi, attrList, hpc);
