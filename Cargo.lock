@@ -427,6 +427,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "crossterm",
+ "libc",
  "portable-pty",
  "unicode-width",
  "vte",
