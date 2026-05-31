@@ -33,12 +33,16 @@ impl Renderer {
 
     pub fn render(&mut self, screen: &Screen, overlay: &Overlay) -> String {
         let next = compose_frame(screen, overlay);
-        let output =
+        let mut output =
             if self.force_full || self.last.as_ref().map(|last| last.size) != Some(next.size) {
                 full_draw(&next)
             } else {
                 diff_draw(self.last.as_ref().expect("last frame exists"), &next)
             };
+        if !output.is_empty() {
+            output.insert_str(0, "\x1b[?25l");
+            output.push_str("\x1b[?25h");
+        }
         self.last = Some(next);
         self.force_full = false;
         output
@@ -63,7 +67,7 @@ pub fn compose_frame(screen: &Screen, overlay: &Overlay) -> Frame {
 }
 
 fn full_draw(frame: &Frame) -> String {
-    let mut out = String::from("\x1b[?25l\x1b[0m\x1b[2J");
+    let mut out = String::from("\x1b[0m\x1b[2J");
     for row in 0..frame.size.rows {
         emit_changed_row(&mut out, frame, row);
     }

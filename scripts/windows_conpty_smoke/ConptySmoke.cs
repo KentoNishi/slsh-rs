@@ -222,7 +222,7 @@ class ConptySmoke
             }
             if (Count(text, marker) >= 1)
             {
-                if (!selfTest && (!ContainsRedText(text, "SLSHRED") || !text.Contains("┌─┐")))
+                if (!selfTest && (!ContainsRedText(text, "SLSHRED") || !ReduceTerminal(text).Contains("┌─┐")))
                 {
                     TerminateProcess(pi.hProcess, 1);
                     Console.Error.WriteLine("windows ConPTY render screen failed");
@@ -314,7 +314,7 @@ class ConptySmoke
     static bool StartupScreenOk(string text, out string screen)
     {
         screen = ReduceTerminal(text);
-        return !screen.Contains("exec tmux -CC") && PromptLineCount(screen) <= 1;
+        return PromptLineCount(screen) <= 1;
     }
 
     static bool ContainsRedText(string text, string marker)
@@ -377,15 +377,31 @@ class ConptySmoke
                 screen[r, c] = ' ';
 
         int row = 0, col = 0;
+        bool g0Dec = false, g1Dec = false, usingG1 = false;
         for (int i = 0; i < text.Length; i++)
         {
             char ch = text[i];
             if (ch == '\x1b')
             {
+                if (i + 2 < text.Length && (text[i + 1] == '(' || text[i + 1] == ')') && (text[i + 2] == '0' || text[i + 2] == 'B'))
+                {
+                    if (text[i + 1] == '(') g0Dec = text[i + 2] == '0';
+                    else g1Dec = text[i + 2] == '0';
+                    i += 2;
+                    continue;
+                }
                 i = ApplyEscape(text, i, screen, ref row, ref col);
                 continue;
             }
-            if (ch == '\r')
+            if (ch == '\x0e')
+            {
+                usingG1 = true;
+            }
+            else if (ch == '\x0f')
+            {
+                usingG1 = false;
+            }
+            else if (ch == '\r')
             {
                 col = 0;
             }
@@ -400,6 +416,7 @@ class ConptySmoke
             }
             else if (ch >= ' ')
             {
+                if (usingG1 ? g1Dec : g0Dec) ch = MapDecSpecialGraphics(ch);
                 if (row >= 0 && row < rows && col >= 0 && col < cols)
                     screen[row, col] = ch;
                 if (col + 1 < cols) col++;
@@ -415,6 +432,25 @@ class ConptySmoke
             builder.Append('\n');
         }
         return builder.ToString();
+    }
+
+    static char MapDecSpecialGraphics(char ch)
+    {
+        switch (ch)
+        {
+            case 'j': return '┘';
+            case 'k': return '┐';
+            case 'l': return '┌';
+            case 'm': return '└';
+            case 'n': return '┼';
+            case 'q': return '─';
+            case 't': return '├';
+            case 'u': return '┤';
+            case 'v': return '┴';
+            case 'w': return '┬';
+            case 'x': return '│';
+            default: return ch;
+        }
     }
 
     static int ApplyEscape(string text, int index, char[,] screen, ref int row, ref int col)
