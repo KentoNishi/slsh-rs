@@ -355,6 +355,7 @@ impl Screen {
     fn set_alternate(&mut self, enabled: bool) {
         self.active = if enabled {
             self.saved_cursor = self.cursor;
+            self.cursor = Cursor::default();
             self.alternate.clear();
             ActiveBuffer::Alternate
         } else {
@@ -941,12 +942,20 @@ mod tests {
 
     #[test]
     fn switches_alternate_screen() {
-        let mut screen = Screen::new(Size { cols: 4, rows: 1 });
+        let mut screen = Screen::new_at(Size { cols: 4, rows: 3 }, Cursor { row: 2, col: 0 });
 
-        feed(&mut screen, b"main\x1b[?1049halt\x1b[?1049l");
+        feed(&mut screen, b"p\x1b[?1049halt\x1b[?1049l");
 
         assert_eq!(screen.active(), ActiveBuffer::Primary);
-        assert_eq!(screen.cell(Cursor { row: 0, col: 0 }).ch, 'm');
+        assert_eq!(screen.cursor(), Cursor { row: 2, col: 1 });
+        assert_eq!(screen.cell(Cursor { row: 2, col: 0 }).ch, 'p');
+        assert_eq!(
+            screen
+                .alternate
+                .get(screen.size, Cursor { row: 0, col: 0 })
+                .ch,
+            'a'
+        );
     }
 
     #[test]
