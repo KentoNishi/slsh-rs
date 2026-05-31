@@ -13,7 +13,7 @@ use crossterm::execute;
 use crossterm::style::ResetColor;
 use crossterm::terminal;
 use input::InputEvent;
-use predict::BasePredictor;
+use predict::{BasePredictor, Overlay};
 use render::Renderer;
 use screen::{ActiveBuffer, Screen, Size};
 use ssh_args::{LaunchMode, ParsedSshArgs};
@@ -80,7 +80,7 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
     } else {
         Transport::spawn_ssh(&ssh_args, cols.max(1), rows.max(1))?
     };
-    let _terminal = TerminalGuard::enter()?;
+    let mut terminal_guard = TerminalGuard::enter()?;
     let mut stdout = io::stdout();
     let mut key_trace = KeyTrace::from_env();
     let mut pressed_keys = HashSet::new();
@@ -219,6 +219,9 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
         }
 
         if let Some(status) = transport.try_wait()? {
+            terminal_guard
+                .leave_after_screen(&mut stdout, &screen, &predictor.overlay)
+                .context("failed to restore terminal")?;
             return Ok(transport::pty_exit_code(status));
         }
 
@@ -429,7 +432,9 @@ fn private_mode_params_contain(params: &[u8], modes: &[u16]) -> bool {
         .any(|mode| modes.contains(&mode))
 }
 
-struct TerminalGuard;
+struct TerminalGuard {
+    restored: bool,
+}
 
 impl TerminalGuard {
     fn enter() -> Result<Self> {
@@ -437,7 +442,22 @@ impl TerminalGuard {
         let _ = crossterm::ansi_support::supports_ansi();
 
         terminal::enable_raw_mode().context("failed to enable raw mode")?;
-        Ok(Self)
+        Ok(Self { restored: false })
+    }
+
+    fn leave_after_screen(
+        &mut self,
+        stdout: &mut impl Write,
+        screen: &Screen,
+        overlay: &Overlay,
+    ) -> Result<()> {
+        stdout
+            .write_all(terminal_restore_sequence(screen, overlay).as_bytes())
+            .context("failed to write terminal restore sequence")?;
+        stdout.flush().context("failed to flush terminal restore")?;
+        terminal::disable_raw_mode().context("failed to disable raw mode")?;
+        self.restored = true;
+        Ok(())
     }
 }
 
@@ -461,9 +481,12 @@ impl KeyTrace {
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
+        if self.restored {
+            return;
+        }
         let _ = execute!(
             io::stdout(),
-            crossterm::style::Print(terminal_restore_sequence()),
+            crossterm::style::Print(fallback_terminal_restore_sequence()),
             ResetColor,
             Show
         );
@@ -471,8 +494,41 @@ impl Drop for TerminalGuard {
     }
 }
 
-fn terminal_restore_sequence() -> &'static str {
-    "\x1b[0m\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1049l\r\n"
+fn terminal_restore_sequence(screen: &Screen, overlay: &Overlay) -> String {
+    let row = final_screen_row(screen, overlay);
+    let rows = screen.size().rows.max(1);
+    let mut sequence = String::from(terminal_mode_restore_sequence());
+    if row + 1 < rows {
+        sequence.push_str(&format!("\x1b[{};1H\x1b[K", row + 2));
+    } else {
+        sequence.push_str(&format!("\x1b[{};1H\x1b[K\r\n", rows));
+    }
+    sequence
+}
+
+fn fallback_terminal_restore_sequence() -> &'static str {
+    "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1049l\x1b[0m\x1b[?25h\r\n"
+}
+
+fn terminal_mode_restore_sequence() -> &'static str {
+    "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1049l\x1b[0m\x1b[?25h"
+}
+
+fn final_screen_row(screen: &Screen, overlay: &Overlay) -> u16 {
+    let mut row = screen.cursor().row;
+    if let Some(cursor) = overlay.cursor {
+        row = row.max(cursor.row);
+    }
+    for cell in &overlay.cells {
+        row = row.max(cell.pos.row);
+    }
+    let cols = screen.size().cols.max(1) as usize;
+    for (index, cell) in screen.cells().iter().enumerate() {
+        if *cell != screen::Cell::default() {
+            row = row.max((index / cols) as u16);
+        }
+    }
+    row.min(screen.size().rows.saturating_sub(1))
 }
 
 #[cfg(test)]
@@ -521,8 +577,63 @@ mod tests {
     }
 
     #[test]
-    fn terminal_restore_leaves_parent_prompt_on_next_line() {
-        assert!(terminal_restore_sequence().ends_with("\r\n"));
+    fn terminal_restore_moves_parent_prompt_below_content() {
+        let mut screen = Screen::new(Size { cols: 20, rows: 5 });
+        let mut parser = vte::Parser::new();
+        screen.feed(&mut parser, b"hello");
+        let overlay = Overlay {
+            enabled: true,
+            cells: Vec::new(),
+            cursor: None,
+        };
+
+        let sequence = terminal_restore_sequence(&screen, &overlay);
+
+        assert!(sequence.contains("\x1b[2;1H\x1b[K"));
+        assert!(!sequence.ends_with("\r\n"));
+    }
+
+    #[test]
+    fn terminal_restore_accounts_for_overlay_below_confirmed_cursor() {
+        let screen = Screen::new(Size { cols: 20, rows: 5 });
+        let overlay = Overlay {
+            enabled: true,
+            cells: vec![predict::OverlayCell {
+                pos: screen::Cursor { row: 2, col: 0 },
+                cell: screen::Cell {
+                    ch: 'x',
+                    style: screen::Style::default(),
+                },
+                under: screen::Cell::default(),
+                kind: predict::OverlayKind::Printable,
+            }],
+            cursor: None,
+        };
+
+        let sequence = terminal_restore_sequence(&screen, &overlay);
+
+        assert!(sequence.contains("\x1b[4;1H\x1b[K"));
+    }
+
+    #[test]
+    fn terminal_restore_scrolls_when_content_reaches_bottom() {
+        let mut screen = Screen::new(Size { cols: 20, rows: 5 });
+        let mut parser = vte::Parser::new();
+        screen.feed(&mut parser, b"\x1b[5;1Hbottom");
+        let overlay = Overlay {
+            enabled: true,
+            cells: Vec::new(),
+            cursor: None,
+        };
+
+        let sequence = terminal_restore_sequence(&screen, &overlay);
+
+        assert!(sequence.contains("\x1b[5;1H\x1b[K\r\n"));
+    }
+
+    #[test]
+    fn fallback_terminal_restore_leaves_parent_prompt_on_next_line() {
+        assert!(fallback_terminal_restore_sequence().ends_with("\r\n"));
     }
 
     #[test]
