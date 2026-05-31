@@ -94,7 +94,7 @@ class WindowsTerminalSmoke
                 RequireMissingRemoteFile(ssh, host, cancelledMarker, "ctrl-c cancelled marker");
                 Trace("ctrl-c passed");
 
-                Text("printf '\\033[31mSLSHWT%s\\033[0m\\n\\016lqk\\017\\n' RED; touch " + renderMarker);
+                Text("printf '\\033[31mSLSHWT%s\\033[0m\\n\\033)0\\016lqk\\017\\n' RED; touch " + renderMarker);
                 Enter();
                 RequireRemoteFile(ssh, host, renderMarker, 40, "render marker");
                 Trace("render marker passed");

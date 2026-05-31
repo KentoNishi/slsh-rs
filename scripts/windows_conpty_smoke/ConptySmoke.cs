@@ -104,7 +104,7 @@ class ConptySmoke
         string marker = selfTest ? "CONPTYSELFOK" : "SLSHCONPTYOK";
         string inputText = selfTest
             ? "echo CONPTYSELFOK\r"
-            : "echo SLSHCONPTYx\x7fOK; printf '\\033[31mSLSHRED\\033[0m\\n\\016lqk\\017\\n'\r";
+            : "echo SLSHCONPTYx\x7fOK; printf '\\033[31mSLSHRED\\033[0m\\n\\033)0\\016lqk\\017\\n'\r";
         string logPath = Path.Combine(Path.GetTempPath(), "slsh-conpty-keys.log");
         if (File.Exists(logPath)) File.Delete(logPath);
 
