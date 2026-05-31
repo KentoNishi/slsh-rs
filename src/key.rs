@@ -4,6 +4,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 pub enum KeyIntent {
     Printable(char),
     Backspace,
+    Submit,
     Nonlinear,
     TogglePrediction,
     Unsupported,
@@ -38,7 +39,7 @@ pub fn encode_key_with_mode(event: KeyEvent, application_cursor_keys: bool) -> E
             if let Some(sequence) = modified_other_key(13, modifiers) {
                 bytes(sequence, KeyIntent::Nonlinear)
             } else {
-                modified_bytes(vec![b'\r'], modifiers, KeyIntent::Nonlinear)
+                modified_bytes(vec![b'\r'], modifiers, KeyIntent::Submit)
             }
         }
         KeyCode::Char('\t') | KeyCode::Tab => {
@@ -269,7 +270,9 @@ mod tests {
 
     #[test]
     fn encodes_enter_backspace_and_ctrl() {
-        assert_eq!(enc(KeyCode::Enter, KeyModifiers::NONE).bytes, b"\r");
+        let enter = enc(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(enter.bytes, b"\r");
+        assert_eq!(enter.intent, KeyIntent::Submit);
         assert_eq!(enc(KeyCode::Backspace, KeyModifiers::NONE).bytes, &[0x7f]);
         assert_eq!(
             enc(KeyCode::Char('c'), KeyModifiers::CONTROL).bytes,

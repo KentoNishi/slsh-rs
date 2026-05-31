@@ -22,6 +22,7 @@ def main() -> int:
     output = run_loopback_shell(marker.decode())
     command_output = run_loopback_command(command_marker.decode())
     delayed_echo_output = run_delayed_local_echo()
+    delayed_submit_output = run_delayed_submit_overlay()
     seeded_cursor_output = run_seeded_cursor_overlay()
     scrolled_overlay_output = run_scrolled_overlay()
 
@@ -32,6 +33,8 @@ def main() -> int:
         failed.append("remote command marker")
     if b"SLSHLAG" not in delayed_echo_output:
         failed.append("delayed local echo")
+    if b"echo SLSHSUBMIT" not in delayed_submit_output:
+        failed.append("delayed submit keeps overlay")
     if b"\x1b[10;" not in seeded_cursor_output or b"\x1b[1;" in seeded_cursor_output:
         failed.append("startup cursor seeded overlay")
     if (
@@ -51,6 +54,8 @@ def main() -> int:
         sys.stderr.buffer.write(command_output)
         sys.stderr.write("\nDelayed echo bytes:\n")
         sys.stderr.buffer.write(delayed_echo_output)
+        sys.stderr.write("\nDelayed submit bytes:\n")
+        sys.stderr.buffer.write(delayed_submit_output)
         sys.stderr.write("\nSeeded cursor bytes:\n")
         sys.stderr.buffer.write(seeded_cursor_output)
         sys.stderr.write("\nScrolled overlay bytes:\n")
@@ -159,6 +164,52 @@ def run_delayed_local_echo() -> bytes:
                 sent = True
                 capture_until = time.time() + 0.25
             if capture_until is not None and time.time() >= capture_until:
+                return output
+    finally:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+
+    return output
+
+
+def run_delayed_submit_overlay() -> bytes:
+    argv = [os.path.join(ROOT, "target", "debug", "slsh"), "ignored-host"]
+    env = os.environ.copy()
+    env["SLSH_LOOPBACK"] = "1"
+    env["SLSH_DELAY_MS"] = "1000"
+    env.setdefault("SHELL", "/bin/sh")
+
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.execvpe(argv[0], argv, env)
+
+    termios.tcflush(fd, termios.TCIOFLUSH)
+    os.set_blocking(fd, False)
+    fcntl_rows_cols(fd, 24, 80)
+
+    output = b""
+    sent = False
+    sent_at = 0.0
+    send_at = time.time() + 1.25
+    deadline = time.time() + 4
+    try:
+        while time.time() < deadline:
+            readable, _, _ = select.select([fd], [], [], 0.02)
+            if readable:
+                try:
+                    output += os.read(fd, 4096)
+                except BlockingIOError:
+                    pass
+                except OSError:
+                    return output
+
+            if not sent and time.time() >= send_at:
+                os.write(fd, b"echo SLSHSUBMIT\r")
+                sent = True
+                sent_at = time.time()
+            if sent and time.time() - sent_at >= 0.25:
                 return output
     finally:
         try:
