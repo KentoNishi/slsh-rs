@@ -58,10 +58,11 @@ fn run_passthrough(args: &[String]) -> Result<i32> {
 
 fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
     let host = parsed.host.as_ref().context("missing ssh host")?;
+    let session_name = make_session_name();
     let launcher = if parsed.remote_command.is_empty() {
-        tmux::persistent_launcher()
+        tmux::shell_launcher(&session_name)
     } else {
-        tmux::command_launcher(&command_session_name(), &parsed.remote_command)
+        tmux::command_launcher(&session_name, &parsed.remote_command)
     };
 
     let mut ssh_args = parsed.ssh_options.clone();
@@ -80,7 +81,7 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
     let mut transport = Transport::spawn(&ssh_args)?;
     let mut pending_lines = wait_for_control_start(&mut transport)?;
     let _terminal = TerminalGuard::enter()?;
-    let mut active_pane: Option<String> = None;
+    let mut active_pane: Option<String> = Some(session_name);
     let mut stdout = io::stdout();
     let mut done = false;
     let mut key_trace = KeyTrace::from_env();
@@ -184,12 +185,12 @@ fn wait_for_control_start(transport: &mut Transport) -> Result<Vec<String>> {
     }
 }
 
-fn command_session_name() -> String {
+fn make_session_name() -> String {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis())
         .unwrap_or_default();
-    format!("slsh-cmd-{}-{millis}", std::process::id())
+    format!("slsh-{}-{millis}", std::process::id())
 }
 
 fn exit_code(status: ExitStatus) -> i32 {
