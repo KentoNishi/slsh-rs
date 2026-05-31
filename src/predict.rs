@@ -19,6 +19,14 @@ pub struct OverlayCell {
 #[derive(Debug, Clone)]
 pub struct BasePredictor {
     pub overlay: Overlay,
+    owned: Vec<OwnedCell>,
+    edit_anchor: Option<Cursor>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OwnedCell {
+    pos: Cursor,
+    cell: Cell,
 }
 
 impl BasePredictor {
@@ -29,6 +37,8 @@ impl BasePredictor {
                 cells: Vec::new(),
                 cursor: None,
             },
+            owned: Vec::new(),
+            edit_anchor: None,
         }
     }
 
@@ -40,6 +50,8 @@ impl BasePredictor {
     pub fn clear(&mut self) {
         self.overlay.cells.clear();
         self.overlay.cursor = None;
+        self.owned.clear();
+        self.edit_anchor = None;
     }
 
     pub fn on_key(&mut self, intent: KeyIntent, screen: &Screen) {
@@ -69,6 +81,7 @@ impl BasePredictor {
         if self.overlay.cells.is_empty() {
             self.overlay.cursor = None;
         }
+        self.validate_owned_span(screen);
     }
 
     fn predict_printable(&mut self, ch: char, screen: &Screen) {
@@ -82,6 +95,13 @@ impl BasePredictor {
             return;
         }
 
+        if self.owned.is_empty() && self.overlay.cells.is_empty() {
+            self.edit_anchor = Some(screen.cursor());
+        } else if self.overlay.cells.is_empty() && self.expected_cursor(screen) != screen.cursor() {
+            self.clear();
+            self.edit_anchor = Some(screen.cursor());
+        }
+
         let mut cursor = self.overlay.cursor.unwrap_or_else(|| screen.cursor());
         if width == 2 && cursor.col + 1 >= screen.size().cols {
             cursor.col = 0;
@@ -93,14 +113,17 @@ impl BasePredictor {
         }
 
         let under = screen.cell(cursor);
+        let cell = Cell {
+            ch,
+            style: under.style,
+        };
         self.overlay.cells.push(OverlayCell {
             pos: cursor,
-            cell: Cell {
-                ch,
-                style: under.style,
-            },
+            cell,
             under,
         });
+        self.owned.retain(|owned| owned.pos != cursor);
+        self.owned.push(OwnedCell { pos: cursor, cell });
 
         if cursor.col + width < screen.size().cols {
             cursor.col += width;
@@ -133,7 +156,13 @@ impl BasePredictor {
             .rposition(|cell| cell.pos == target)
         {
             self.overlay.cells.remove(index);
+            self.remove_owned(target);
             self.overlay.cursor = Some(target);
+            return;
+        }
+
+        if !self.remove_owned(target) {
+            self.clear();
             return;
         }
 
@@ -158,6 +187,72 @@ impl BasePredictor {
             col: cursor.col - 1,
         })
     }
+
+    fn remove_owned(&mut self, target: Cursor) -> bool {
+        let Some(index) = self.owned.iter().rposition(|owned| owned.pos == target) else {
+            return false;
+        };
+        self.owned.remove(index);
+        if self.owned.is_empty() && self.overlay.cells.is_empty() {
+            self.edit_anchor = None;
+        }
+        true
+    }
+
+    fn validate_owned_span(&mut self, screen: &Screen) {
+        for owned in &self.owned {
+            if self
+                .overlay
+                .cells
+                .iter()
+                .any(|cell| cell.pos == owned.pos && cell.cell == owned.cell)
+            {
+                continue;
+            }
+            if screen.cell(owned.pos) != owned.cell {
+                self.clear();
+                return;
+            }
+        }
+
+        if self.owned.is_empty() && self.overlay.cells.is_empty() {
+            self.edit_anchor = None;
+            return;
+        }
+
+        if self.overlay.cells.is_empty()
+            && !self.owned.is_empty()
+            && self.expected_cursor(screen) != screen.cursor()
+        {
+            self.clear();
+        }
+    }
+
+    fn expected_cursor(&self, screen: &Screen) -> Cursor {
+        self.owned
+            .last()
+            .map(|owned| advance_cursor(screen, owned.pos, width_of(owned.cell.ch)))
+            .or(self.edit_anchor)
+            .unwrap_or_else(|| screen.cursor())
+    }
+}
+
+fn advance_cursor(screen: &Screen, cursor: Cursor, width: u16) -> Cursor {
+    if cursor.col + width < screen.size().cols {
+        Cursor {
+            row: cursor.row,
+            col: cursor.col + width,
+        }
+    } else {
+        Cursor {
+            row: (cursor.row + 1).min(screen.size().rows.saturating_sub(1)),
+            col: 0,
+        }
+    }
+}
+
+fn width_of(ch: char) -> u16 {
+    UnicodeWidthChar::width(ch).unwrap_or(0) as u16
 }
 
 pub fn hidden_input_guard(screen: &Screen) -> bool {
@@ -186,6 +281,11 @@ mod tests {
         screen
     }
 
+    fn feed(screen: &mut Screen, text: &[u8]) {
+        let mut parser = vte::Parser::new();
+        screen.feed(&mut parser, text);
+    }
+
     #[test]
     fn predicts_printable_at_cursor() {
         let screen = screen_with(b"$ ");
@@ -210,24 +310,43 @@ mod tests {
     }
 
     #[test]
-    fn backspace_hides_confirmed_cell() {
-        let screen = screen_with(b"abc");
+    fn backspace_does_not_hide_prompt_cell() {
+        let screen = screen_with(b"$ ");
         let mut predictor = BasePredictor::new(true);
 
+        predictor.on_key(KeyIntent::Backspace, &screen);
+
+        assert!(predictor.overlay.cells.is_empty());
+        assert_eq!(predictor.overlay.cursor, None);
+    }
+
+    #[test]
+    fn backspace_hides_confirmed_owned_cell() {
+        let mut screen = screen_with(b"$ ");
+        let mut predictor = BasePredictor::new(true);
+
+        predictor.on_key(KeyIntent::Printable('a'), &screen);
+        feed(&mut screen, b"a");
+        predictor.reconcile(&screen);
         predictor.on_key(KeyIntent::Backspace, &screen);
 
         assert_eq!(predictor.overlay.cells.len(), 1);
         assert_eq!(predictor.overlay.cells[0].pos, Cursor { row: 0, col: 2 });
         assert_eq!(predictor.overlay.cells[0].cell.ch, ' ');
-        assert_eq!(predictor.overlay.cells[0].under.ch, 'c');
+        assert_eq!(predictor.overlay.cells[0].under.ch, 'a');
         assert_eq!(predictor.overlay.cursor, Some(Cursor { row: 0, col: 2 }));
     }
 
     #[test]
-    fn repeated_backspace_hides_confirmed_cells_in_order() {
-        let screen = screen_with(b"abc");
+    fn repeated_backspace_hides_confirmed_owned_cells_in_order() {
+        let mut screen = screen_with(b"$ ");
         let mut predictor = BasePredictor::new(true);
 
+        for ch in ['a', 'b', 'c'] {
+            predictor.on_key(KeyIntent::Printable(ch), &screen);
+        }
+        feed(&mut screen, b"abc");
+        predictor.reconcile(&screen);
         predictor.on_key(KeyIntent::Backspace, &screen);
         predictor.on_key(KeyIntent::Backspace, &screen);
         predictor.on_key(KeyIntent::Backspace, &screen);
@@ -239,20 +358,51 @@ mod tests {
                 .iter()
                 .map(|cell| cell.pos.col)
                 .collect::<Vec<_>>(),
-            vec![2, 1, 0]
+            vec![4, 3, 2]
         );
-        assert_eq!(predictor.overlay.cursor, Some(Cursor { row: 0, col: 0 }));
+        assert_eq!(predictor.overlay.cursor, Some(Cursor { row: 0, col: 2 }));
     }
 
     #[test]
     fn confirmed_remote_backspace_removes_deletion_overlay() {
-        let mut screen = screen_with(b"abc");
+        let mut screen = screen_with(b"$ ");
         let mut predictor = BasePredictor::new(true);
 
-        predictor.on_key(KeyIntent::Backspace, &screen);
-        let mut parser = vte::Parser::new();
-        screen.feed(&mut parser, b"\x08 \x08");
+        predictor.on_key(KeyIntent::Printable('a'), &screen);
+        feed(&mut screen, b"a");
         predictor.reconcile(&screen);
+        predictor.on_key(KeyIntent::Backspace, &screen);
+        feed(&mut screen, b"\x08 \x08");
+        predictor.reconcile(&screen);
+
+        assert!(predictor.overlay.cells.is_empty());
+        assert_eq!(predictor.overlay.cursor, None);
+    }
+
+    #[test]
+    fn nonlinear_input_clears_owned_cells_before_backspace() {
+        let mut screen = screen_with(b"$ ");
+        let mut predictor = BasePredictor::new(true);
+
+        predictor.on_key(KeyIntent::Printable('a'), &screen);
+        feed(&mut screen, b"a");
+        predictor.reconcile(&screen);
+        predictor.on_key(KeyIntent::Nonlinear, &screen);
+        predictor.on_key(KeyIntent::Backspace, &screen);
+
+        assert!(predictor.overlay.cells.is_empty());
+        assert_eq!(predictor.overlay.cursor, None);
+    }
+
+    #[test]
+    fn remote_cursor_jump_clears_owned_cells_before_backspace() {
+        let mut screen = screen_with(b"$ ");
+        let mut predictor = BasePredictor::new(true);
+
+        predictor.on_key(KeyIntent::Printable('a'), &screen);
+        feed(&mut screen, b"a\r\n$ ");
+        predictor.reconcile(&screen);
+        predictor.on_key(KeyIntent::Backspace, &screen);
 
         assert!(predictor.overlay.cells.is_empty());
         assert_eq!(predictor.overlay.cursor, None);
