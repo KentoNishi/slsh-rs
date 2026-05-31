@@ -42,7 +42,7 @@ if (Test-Path $result) {
 
 & $wt new-tab --title "SLSH-WT-SMOKE-$stamp" $exe $SlshExe $HostName $result
 
-for ($i = 0; $i -lt 90; $i++) {
+for ($i = 0; $i -lt 180; $i++) {
     if (Test-Path $result) {
         Copy-Item -Force $result $archiveResult
         $text = Get-Content -Raw $result
