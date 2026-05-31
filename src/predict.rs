@@ -65,19 +65,34 @@ impl BasePredictor {
 
     pub fn reconcile(&mut self, screen: &Screen) {
         let mut kept = Vec::new();
-        for cell in &self.overlay.cells {
+        let mut conflict = None;
+
+        for (index, cell) in self.overlay.cells.iter().enumerate() {
             let confirmed = screen.cell(cell.pos);
             if confirmed == cell.cell || confirmed_matches_prediction(confirmed, cell.cell) {
                 continue;
             }
             if confirmed != cell.under {
-                self.clear();
-                return;
+                conflict = Some(index);
+                break;
             }
             kept.push(*cell);
         }
 
-        self.overlay.cells = kept;
+        if let Some(index) = conflict {
+            let suffix = self.pending_suffix_after_conflict(index, screen);
+            if suffix.is_empty()
+                || !remote_cursor_accepts_suffix(screen, &suffix, self.overlay.cursor)
+            {
+                self.clear();
+                return;
+            }
+            self.overlay.cells = suffix;
+            self.retain_owned_overlay_cells();
+            self.edit_anchor = self.overlay.cells.first().map(|cell| cell.pos);
+        } else {
+            self.overlay.cells = kept;
+        }
         if self.overlay.cells.is_empty() {
             self.overlay.cursor = None;
         }
@@ -200,6 +215,26 @@ impl BasePredictor {
         true
     }
 
+    fn pending_suffix_after_conflict(&self, conflict: usize, screen: &Screen) -> Vec<OverlayCell> {
+        let mut suffix = Vec::new();
+        for cell in self.overlay.cells.iter().skip(conflict + 1) {
+            if !is_printable_prediction(*cell) || screen.cell(cell.pos) != cell.under {
+                return Vec::new();
+            }
+            suffix.push(*cell);
+        }
+        suffix
+    }
+
+    fn retain_owned_overlay_cells(&mut self) {
+        self.owned.retain(|owned| {
+            self.overlay
+                .cells
+                .iter()
+                .any(|cell| cell.pos == owned.pos && cell.cell == owned.cell)
+        });
+    }
+
     fn validate_owned_span(&mut self, screen: &Screen) {
         for owned in &self.owned {
             if self
@@ -279,6 +314,19 @@ fn confirmed_matches_prediction(confirmed: Cell, predicted: Cell) -> bool {
     let mut predicted_confirmed_style = predicted.style;
     predicted_confirmed_style.dim = false;
     confirmed.ch == predicted.ch && confirmed.style == predicted_confirmed_style
+}
+
+fn is_printable_prediction(cell: OverlayCell) -> bool {
+    cell.cell.ch != ' ' || cell.under.ch == ' '
+}
+
+fn remote_cursor_accepts_suffix(
+    screen: &Screen,
+    suffix: &[OverlayCell],
+    overlay_cursor: Option<Cursor>,
+) -> bool {
+    let cursor = screen.cursor();
+    overlay_cursor == Some(cursor) || suffix.iter().any(|cell| cell.pos == cursor)
 }
 
 pub fn hidden_input_guard(screen: &Screen) -> bool {
@@ -467,6 +515,49 @@ mod tests {
         predictor.on_key(KeyIntent::Printable('a'), &screen);
         let mut parser = vte::Parser::new();
         screen.feed(&mut parser, b"b");
+        predictor.reconcile(&screen);
+
+        assert!(predictor.overlay.cells.is_empty());
+    }
+
+    #[test]
+    fn conflicting_prefix_keeps_linear_pending_suffix() {
+        let mut screen = screen_with(b"$ ");
+        let mut predictor = BasePredictor::new(true);
+
+        for ch in "abcdef".chars() {
+            predictor.on_key(KeyIntent::Printable(ch), &screen);
+        }
+        feed(&mut screen, b"abcX");
+        predictor.reconcile(&screen);
+
+        assert_eq!(
+            predictor
+                .overlay
+                .cells
+                .iter()
+                .map(|cell| (cell.pos.col, cell.cell.ch))
+                .collect::<Vec<_>>(),
+            vec![(6, 'e'), (7, 'f')]
+        );
+        assert_eq!(predictor.overlay.cursor, Some(Cursor { row: 0, col: 8 }));
+
+        feed(&mut screen, b"ef");
+        predictor.reconcile(&screen);
+
+        assert!(predictor.overlay.cells.is_empty());
+        assert_eq!(predictor.overlay.cursor, None);
+    }
+
+    #[test]
+    fn conflicting_prefix_clears_suffix_after_remote_cursor_jump() {
+        let mut screen = screen_with(b"$ ");
+        let mut predictor = BasePredictor::new(true);
+
+        for ch in "abcdef".chars() {
+            predictor.on_key(KeyIntent::Printable(ch), &screen);
+        }
+        feed(&mut screen, b"abcX\r\n$ ");
         predictor.reconcile(&screen);
 
         assert!(predictor.overlay.cells.is_empty());
