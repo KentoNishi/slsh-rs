@@ -239,7 +239,14 @@ class ConptySmoke
                     return 1;
                 }
                 Write(input, "exit\r");
-                Cleanup(pi, attrList, hpc);
+                if (WaitForSingleObject(pi.hProcess, 10000) != 0)
+                {
+                    TerminateProcess(pi.hProcess, 1);
+                    Console.Error.WriteLine("windows ConPTY exit failed");
+                    Cleanup(pi, attrList, hpc);
+                    return 1;
+                }
+                CleanupExited(pi, attrList, hpc);
                 Console.WriteLine("windows ConPTY smoke passed");
                 if (File.Exists(logPath)) Console.WriteLine(ReadShared(logPath));
                 return 0;
@@ -263,6 +270,11 @@ class ConptySmoke
     static void Cleanup(PROCESS_INFORMATION pi, IntPtr attrList, IntPtr hpc)
     {
         WaitForSingleObject(pi.hProcess, 3000);
+        CleanupExited(pi, attrList, hpc);
+    }
+
+    static void CleanupExited(PROCESS_INFORMATION pi, IntPtr attrList, IntPtr hpc)
+    {
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);
         DeleteProcThreadAttributeList(attrList);
