@@ -115,8 +115,8 @@ class WindowsTerminalSmoke
 
                 Text("exit");
                 Enter();
-                Thread.Sleep(1000);
-                if (!process.HasExited) process.Kill();
+                if (!process.WaitForExit(10000))
+                    throw new TimeoutException("slsh did not exit after remote exit command");
                 Trace("stopped slsh");
             }
 

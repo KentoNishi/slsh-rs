@@ -198,6 +198,7 @@ def run_slsh(port: int, client_key: str, known_hosts: str) -> bytes:
 
     output = b""
     stage = "wait_prompt"
+    exited = False
     deadline = time.time() + 20
 
     try:
@@ -233,14 +234,40 @@ def run_slsh(port: int, client_key: str, known_hosts: str) -> bytes:
                 stage = "wait_alternate"
             elif stage == "wait_alternate" and alternate_exit_reset_seen(output):
                 os.write(fd, b"exit\r")
+                output += read_until_child_exit(pid, fd, 5)
+                exited = True
                 return output
     finally:
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except OSError:
-            pass
+        if not exited:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                pass
 
     return output
+
+
+def read_until_child_exit(pid: int, fd: int, timeout: float) -> bytes:
+    output = b""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            waited, _ = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            return output
+        if waited == pid:
+            return output
+
+        readable, _, _ = select.select([fd], [], [], 0.05)
+        if readable:
+            try:
+                chunk = os.read(fd, 4096)
+            except OSError:
+                chunk = b""
+            if chunk:
+                output += chunk
+
+    raise RuntimeError("slsh did not exit after remote exit command")
 
 
 def prompt_seen(output: bytes) -> bool:

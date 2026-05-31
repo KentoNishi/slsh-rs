@@ -141,6 +141,7 @@ def run_slsh(env: dict[str, str]) -> bytes:
     output = b""
     stage = "wait_prompt"
     stage_at = time.time()
+    exited = False
     deadline = time.time() + 15
 
     try:
@@ -181,12 +182,15 @@ def run_slsh(env: dict[str, str]) -> bytes:
                 stage = "wait_alternate"
             elif stage == "wait_alternate" and alternate_exit_reset_seen(output):
                 os.write(fd, b"exit\r")
+                output += read_until_child_exit(pid, fd, 5)
+                exited = True
                 return output
     finally:
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except OSError:
-            pass
+        if not exited:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                pass
 
     return output
 
@@ -201,6 +205,7 @@ def run_startup_slsh(env: dict[str, str]) -> bytes:
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
 
     output = b""
+    exited = False
     deadline = time.time() + 10
     try:
         while time.time() < deadline:
@@ -214,15 +219,42 @@ def run_startup_slsh(env: dict[str, str]) -> bytes:
                     break
                 output += chunk
                 if "Welcome fake ssh login" in reduce_terminal(output) and prompt_seen(output):
+                    startup_output = output
                     os.write(fd, b"exit\r")
-                    return output
+                    read_until_child_exit(pid, fd, 5)
+                    exited = True
+                    return startup_output
     finally:
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except OSError:
-            pass
+        if not exited:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                pass
 
     return output
+
+
+def read_until_child_exit(pid: int, fd: int, timeout: float) -> bytes:
+    output = b""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            waited, _ = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            return output
+        if waited == pid:
+            return output
+
+        readable, _, _ = select.select([fd], [], [], 0.05)
+        if readable:
+            try:
+                chunk = os.read(fd, 4096)
+            except OSError:
+                chunk = b""
+            if chunk:
+                output += chunk
+
+    raise RuntimeError("slsh did not exit after remote exit command")
 
 
 def reduce_terminal(output: bytes, rows: int = 24, cols: int = 80) -> str:
