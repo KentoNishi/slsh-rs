@@ -333,7 +333,7 @@ class ConptySmoke
                 lock (seen) text = seen.ToString();
                 string slice = text.Substring(Math.Min(probeStart, text.Length));
                 Write(input, "\x18n");
-                if (slice.Contains("Z") && slice.Contains("\x1b[2;1H"))
+                if (slice.Contains("Z") && !slice.Contains("\x1b[1;"))
                 {
                     TerminateProcess(pi.hProcess, 0);
                     Cleanup(pi, attrList, hpc);
