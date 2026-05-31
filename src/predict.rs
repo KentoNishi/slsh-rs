@@ -1,5 +1,5 @@
 use crate::key::KeyIntent;
-use crate::screen::{Cell, Cursor, Screen};
+use crate::screen::{ActiveBuffer, Cell, Cursor, Screen};
 use unicode_width::UnicodeWidthChar;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,6 +22,7 @@ pub struct BasePredictor {
     owned: Vec<OwnedCell>,
     edit_anchor: Option<Cursor>,
     submitted: bool,
+    blocked_after_nonlinear: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,6 +42,7 @@ impl BasePredictor {
             owned: Vec::new(),
             edit_anchor: None,
             submitted: false,
+            blocked_after_nonlinear: false,
         }
     }
 
@@ -55,19 +57,21 @@ impl BasePredictor {
         self.owned.clear();
         self.edit_anchor = None;
         self.submitted = false;
+        self.blocked_after_nonlinear = false;
     }
 
     pub fn on_key(&mut self, intent: KeyIntent, screen: &Screen) {
         match intent {
             KeyIntent::Printable(ch) => self.predict_printable(ch, screen),
             KeyIntent::Backspace => self.predict_backspace(screen),
-            KeyIntent::Submit => self.submit(),
+            KeyIntent::Submit => self.submit(screen),
             KeyIntent::TogglePrediction => self.toggle(),
-            KeyIntent::Nonlinear | KeyIntent::Unsupported => self.clear(),
+            KeyIntent::Nonlinear | KeyIntent::Unsupported => self.block_until_remote_output(),
         }
     }
 
     pub fn reconcile(&mut self, screen: &Screen) {
+        self.blocked_after_nonlinear = false;
         let mut kept = Vec::new();
         let mut conflict = None;
 
@@ -105,7 +109,7 @@ impl BasePredictor {
     }
 
     fn predict_printable(&mut self, ch: char, screen: &Screen) {
-        if self.submitted {
+        if self.submitted || self.blocked_after_nonlinear {
             return;
         }
         if !self.overlay.enabled || hidden_input_guard(screen) {
@@ -162,7 +166,7 @@ impl BasePredictor {
     }
 
     fn predict_backspace(&mut self, screen: &Screen) {
-        if self.submitted {
+        if self.submitted || self.blocked_after_nonlinear {
             return;
         }
         if !self.overlay.enabled || hidden_input_guard(screen) {
@@ -206,10 +210,19 @@ impl BasePredictor {
         self.overlay.cursor = Some(target);
     }
 
-    fn submit(&mut self) {
+    fn submit(&mut self, screen: &Screen) {
+        if !command_submit_context(screen) {
+            self.block_until_remote_output();
+            return;
+        }
         if !self.overlay.cells.is_empty() || !self.owned.is_empty() {
             self.submitted = true;
         }
+    }
+
+    fn block_until_remote_output(&mut self) {
+        self.clear();
+        self.blocked_after_nonlinear = true;
     }
 
     fn backspace_target(&self, screen: &Screen) -> Option<Cursor> {
@@ -367,6 +380,12 @@ pub fn hidden_input_guard(screen: &Screen) -> bool {
     ]
     .iter()
     .any(|needle| tail.contains(needle))
+}
+
+fn command_submit_context(screen: &Screen) -> bool {
+    screen.active() == ActiveBuffer::Primary
+        && !screen.application_cursor_keys()
+        && !screen.content_below_cursor()
 }
 
 #[cfg(test)]
@@ -563,6 +582,63 @@ mod tests {
                 .collect::<String>(),
             "echo hi"
         );
+    }
+
+    #[test]
+    fn submit_in_fullscreen_app_clears_and_waits_for_remote_output() {
+        let mut screen = screen_with(b"$ \x1b[3;1Hstatus\x1b[1;3H");
+        let mut predictor = BasePredictor::new(true);
+
+        predictor.on_key(KeyIntent::Printable('a'), &screen);
+        predictor.on_key(KeyIntent::Submit, &screen);
+        predictor.on_key(KeyIntent::Printable('b'), &screen);
+
+        assert!(predictor.overlay.cells.is_empty());
+        assert!(!predictor.submitted);
+
+        feed(&mut screen, b"\r\n");
+        predictor.reconcile(&screen);
+        predictor.on_key(KeyIntent::Printable('b'), &screen);
+
+        assert_eq!(predictor.overlay.cells.len(), 1);
+        assert_eq!(predictor.overlay.cells[0].cell.ch, 'b');
+    }
+
+    #[test]
+    fn submit_in_alternate_screen_clears_and_waits_for_remote_output() {
+        let mut screen = screen_with(b"\x1b[?1049h");
+        let mut predictor = BasePredictor::new(true);
+
+        predictor.on_key(KeyIntent::Printable('a'), &screen);
+        predictor.on_key(KeyIntent::Submit, &screen);
+        predictor.on_key(KeyIntent::Printable('b'), &screen);
+
+        assert!(predictor.overlay.cells.is_empty());
+
+        feed(&mut screen, b"\r\n");
+        predictor.reconcile(&screen);
+        predictor.on_key(KeyIntent::Printable('b'), &screen);
+
+        assert_eq!(predictor.overlay.cells.len(), 1);
+        assert_eq!(predictor.overlay.cells[0].cell.ch, 'b');
+    }
+
+    #[test]
+    fn printable_after_nonlinear_waits_for_remote_output() {
+        let mut screen = screen_with(b"$ ");
+        let mut predictor = BasePredictor::new(true);
+
+        predictor.on_key(KeyIntent::Nonlinear, &screen);
+        predictor.on_key(KeyIntent::Printable('x'), &screen);
+
+        assert!(predictor.overlay.cells.is_empty());
+
+        feed(&mut screen, b"\r$ ");
+        predictor.reconcile(&screen);
+        predictor.on_key(KeyIntent::Printable('x'), &screen);
+
+        assert_eq!(predictor.overlay.cells.len(), 1);
+        assert_eq!(predictor.overlay.cells[0].cell.ch, 'x');
     }
 
     #[test]
