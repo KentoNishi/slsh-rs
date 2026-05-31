@@ -126,6 +126,17 @@ impl Screen {
         self.application_cursor_keys
     }
 
+    pub fn content_below_cursor(&self) -> bool {
+        for row in self.cursor.row.saturating_add(1)..self.size.rows {
+            for col in 0..self.size.cols {
+                if self.cell(Cursor { row, col }) != Cell::default() {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     pub fn cell(&self, cursor: Cursor) -> Cell {
         self.buffer().get(self.size, cursor)
     }
@@ -913,6 +924,19 @@ mod tests {
 
         feed(&mut screen, b"\x1b[?1l");
         assert!(!screen.application_cursor_keys());
+    }
+
+    #[test]
+    fn detects_content_below_cursor() {
+        let mut screen = Screen::new(Size { cols: 8, rows: 3 });
+
+        feed(&mut screen, b"$ \x1b[3;1Hstatus\x1b[1;3H");
+
+        assert!(screen.content_below_cursor());
+
+        feed(&mut screen, b"\x1b[2J$ ");
+
+        assert!(!screen.content_below_cursor());
     }
 
     #[test]

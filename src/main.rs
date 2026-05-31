@@ -91,21 +91,30 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
 
         for chunk in transport.drain_chunks() {
             let before_active = screen.active();
+            let before_application_cursor = screen.application_cursor_keys();
             screen.feed(&mut parser, &chunk);
             predictor.reconcile(&screen);
             let left_alternate = (before_active == ActiveBuffer::Alternate
                 && screen.active() == ActiveBuffer::Primary)
                 || contains_alternate_exit(&chunk);
-            if left_alternate {
+            let terminal_mode_changed = left_alternate
+                || before_active != screen.active()
+                || before_application_cursor != screen.application_cursor_keys()
+                || contains_terminal_mode_change(&chunk);
+            if terminal_mode_changed {
                 stdout
                     .write_all(&chunk)
                     .context("failed to render ssh output")?;
-                stdout
-                    .write_all(b"\x1b[0m")
-                    .context("failed to reset terminal style")?;
+                if left_alternate {
+                    stdout
+                        .write_all(b"\x1b[0m")
+                        .context("failed to reset terminal style")?;
+                }
                 stdout.flush().context("failed to flush ssh output")?;
                 predictor.clear();
-                screen.reset_style();
+                if left_alternate {
+                    screen.reset_style();
+                }
                 renderer.sync_to_terminal(&screen, &predictor.overlay);
                 raw_synced = true;
                 dirty = false;
@@ -340,6 +349,25 @@ fn contains_alternate_exit(bytes: &[u8]) -> bool {
         })
 }
 
+fn contains_terminal_mode_change(bytes: &[u8]) -> bool {
+    [
+        b"\x1b[?47h".as_slice(),
+        b"\x1b[?47l",
+        b"\x1b[?1047h",
+        b"\x1b[?1047l",
+        b"\x1b[?1049h",
+        b"\x1b[?1049l",
+        b"\x1b[?1h",
+        b"\x1b[?1l",
+    ]
+    .iter()
+    .any(|pattern| {
+        bytes
+            .windows(pattern.len())
+            .any(|window| window == *pattern)
+    })
+}
+
 struct TerminalGuard;
 
 impl TerminalGuard {
@@ -412,6 +440,15 @@ mod tests {
         assert!(contains_alternate_exit(b"abc\x1b[?1047ldef"));
         assert!(contains_alternate_exit(b"\x1b[?47l"));
         assert!(!contains_alternate_exit(b"\x1b[?1049h"));
+    }
+
+    #[test]
+    fn detects_terminal_mode_changes_in_chunk() {
+        assert!(contains_terminal_mode_change(b"\x1b[?1049h"));
+        assert!(contains_terminal_mode_change(b"\x1b[?1049l"));
+        assert!(contains_terminal_mode_change(b"\x1b[?1h"));
+        assert!(contains_terminal_mode_change(b"\x1b[?1l"));
+        assert!(!contains_terminal_mode_change(b"\x1b[31mred"));
     }
 
     #[cfg(unix)]

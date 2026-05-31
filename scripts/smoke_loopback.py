@@ -25,6 +25,7 @@ def main() -> int:
     delayed_submit_output = run_delayed_submit_overlay()
     seeded_cursor_output = run_seeded_cursor_overlay()
     scrolled_overlay_output = run_scrolled_overlay()
+    app_prefix_output = run_app_prefix_guard()
 
     failed = []
     if marker not in output:
@@ -43,6 +44,8 @@ def main() -> int:
         or b"\x1b[1;" in scrolled_overlay_output.split(b"LINE30", 1)[-1]
     ):
         failed.append("scrolled overlay row")
+    if b"Q" in app_prefix_output:
+        failed.append("nonlinear prefix suppresses next printable overlay")
 
     if failed:
         sys.stderr.write("loopback smoke failed: marker missing\n")
@@ -60,6 +63,8 @@ def main() -> int:
         sys.stderr.buffer.write(seeded_cursor_output)
         sys.stderr.write("\nScrolled overlay bytes:\n")
         sys.stderr.buffer.write(scrolled_overlay_output)
+        sys.stderr.write("\nApp prefix bytes:\n")
+        sys.stderr.buffer.write(app_prefix_output)
         sys.stderr.write("\n")
         return 1
 
@@ -328,6 +333,68 @@ def run_scrolled_overlay() -> bytes:
             pass
 
     return output
+
+
+def run_app_prefix_guard() -> bytes:
+    argv = [os.path.join(ROOT, "target", "debug", "slsh"), "ignored-host"]
+    env = os.environ.copy()
+    env["SLSH_LOOPBACK"] = "1"
+    env["SLSH_DELAY_MS"] = "1000"
+    env.setdefault("SHELL", "/bin/sh")
+
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.execvpe(argv[0], argv, env)
+
+    termios.tcflush(fd, termios.TCIOFLUSH)
+    os.set_blocking(fd, False)
+    fcntl_rows_cols(fd, 10, 50)
+
+    app = (
+        "python3 -c 'import os,sys,tty,time;"
+        "tty.setraw(0);"
+        "sys.stdout.write(\"\\033[?1049h\\033[?1h\\033[HAPP\");"
+        "sys.stdout.flush();"
+        "os.read(0,2);"
+        "time.sleep(.2);"
+        "sys.stdout.write(\"\\033[?1l\\033[?1049l\");"
+        "sys.stdout.flush()'\r"
+    ).encode()
+
+    output = b""
+    sent_app = False
+    sent_prefix = False
+    prefix_at = 0.0
+    prefix_start = 0
+    deadline = time.time() + 12
+    try:
+        while time.time() < deadline:
+            readable, _, _ = select.select([fd], [], [], 0.02)
+            if readable:
+                try:
+                    output += os.read(fd, 4096)
+                except BlockingIOError:
+                    pass
+                except OSError:
+                    return output[prefix_start:]
+
+            if not sent_app and (b"$" in output or b"#" in output):
+                os.write(fd, b"\x1b[200~" + app + b"\x1b[201~")
+                sent_app = True
+            if sent_app and not sent_prefix and b"APP" in output:
+                prefix_start = len(output)
+                os.write(fd, b"\x02Q")
+                sent_prefix = True
+                prefix_at = time.time()
+            if sent_prefix and time.time() - prefix_at >= 0.25:
+                return output[prefix_start:]
+    finally:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+
+    return output[prefix_start:]
 
 
 def run_and_collect(argv: list[str], env: dict[str, str]) -> bytes:
