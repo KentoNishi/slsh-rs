@@ -158,6 +158,7 @@ pub fn resize_command(cols: u16, rows: u16) -> String {
     format!("refresh-client -C {cols}x{rows}\n")
 }
 
+#[cfg(any(not(windows), test))]
 pub fn paste_to_tmux(text: &str, pane: Option<&str>) -> String {
     let mut command = String::new();
     let mut literal = String::new();
@@ -198,6 +199,7 @@ pub fn paste_to_tmux(text: &str, pane: Option<&str>) -> String {
     command
 }
 
+#[cfg(any(not(windows), test))]
 fn flush_literal(command: &mut String, pane: Option<&str>, literal: &mut String) {
     if literal.is_empty() {
         return;
