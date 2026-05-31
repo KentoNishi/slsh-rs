@@ -121,35 +121,30 @@ mod windows {
     }
 
     pub fn read() -> io::Result<Option<InputEvent>> {
-        loop {
-            let mut record = MaybeUninit::<InputRecord>::zeroed();
-            let mut read = 0;
-            let ok =
-                unsafe { ReadConsoleInputW(stdin_handle()?, record.as_mut_ptr(), 1, &mut read) };
-            if ok == 0 {
-                return Err(io::Error::last_os_error());
-            }
-            if read == 0 {
-                return Ok(None);
-            }
+        let mut record = MaybeUninit::<InputRecord>::zeroed();
+        let mut read = 0;
+        let ok = unsafe { ReadConsoleInputW(stdin_handle()?, record.as_mut_ptr(), 1, &mut read) };
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if read == 0 {
+            return Ok(None);
+        }
 
-            let record = unsafe { record.assume_init() };
-            match record.event_type {
-                KEY_EVENT => {
-                    let key = unsafe { record.event.key_event };
-                    if let Some(event) = map_key(key) {
-                        return Ok(Some(InputEvent::Key(event)));
-                    }
-                }
-                WINDOW_BUFFER_SIZE_EVENT => {
-                    let size = unsafe { record.event.window_buffer_size };
-                    return Ok(Some(InputEvent::Resize(
-                        size.x.max(1) as u16,
-                        size.y.max(1) as u16,
-                    )));
-                }
-                _ => {}
+        let record = unsafe { record.assume_init() };
+        match record.event_type {
+            KEY_EVENT => {
+                let key = unsafe { record.event.key_event };
+                Ok(map_key(key).map(InputEvent::Key))
             }
+            WINDOW_BUFFER_SIZE_EVENT => {
+                let size = unsafe { record.event.window_buffer_size };
+                Ok(Some(InputEvent::Resize(
+                    size.x.max(1) as u16,
+                    size.y.max(1) as u16,
+                )))
+            }
+            _ => Ok(None),
         }
     }
 
