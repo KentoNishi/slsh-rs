@@ -97,13 +97,19 @@ fn diff_draw(last: &Frame, next: &Frame) -> String {
 }
 
 fn emit_changed_row(out: &mut String, frame: &Frame, row: u16) {
+    let row_start = row as usize * frame.size.cols as usize;
+    let mut row_end = frame.size.cols;
+    while row_end > 0 && frame.cells[row_start + row_end as usize - 1] == Cell::default() {
+        row_end -= 1;
+    }
+
     let mut col = 0;
-    while col < frame.size.cols {
+    while col < row_end {
         let start = col;
         let index = row as usize * frame.size.cols as usize + col as usize;
         let style = frame.cells[index].style;
         col += 1;
-        while col < frame.size.cols {
+        while col < row_end {
             let index = row as usize * frame.size.cols as usize + col as usize;
             if frame.cells[index].style != style {
                 break;
@@ -191,7 +197,8 @@ mod tests {
         );
 
         assert!(out.contains("\x1b[2J"));
-        assert!(out.contains("hi   "));
+        assert!(out.contains("hi"));
+        assert!(!out.contains("hi   "));
     }
 
     #[test]

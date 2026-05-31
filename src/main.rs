@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use crossterm::cursor::{Hide, Show};
 use crossterm::event::{self, Event, KeyEventKind};
 use crossterm::execute;
-use crossterm::style::ResetColor;
+use crossterm::style::{Print, ResetColor};
 use crossterm::terminal::{self, Clear, ClearType};
 use predict::BasePredictor;
 use render::Renderer;
@@ -108,17 +108,22 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
 
         while event::poll(Duration::from_millis(1)).context("failed to poll terminal input")? {
             match event::read().context("failed to read terminal input")? {
-                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                Event::Key(key) => {
                     let mapped = tmux::key_to_tmux(key, active_pane.as_deref());
                     key_trace.log(format_args!(
                         "key {:?} pane {:?} command {:?} intent {:?}",
-                        key, active_pane, mapped.command, mapped.intent
+                        key,
+                        active_pane,
+                        mapped.command.as_deref(),
+                        mapped.intent
                     ));
-                    if let Some(command) = mapped.command {
-                        transport.write_command(&command)?;
+                    if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                        if let Some(command) = mapped.command {
+                            transport.write_command(&command)?;
+                        }
+                        predictor.on_key(mapped.intent, &screen);
+                        dirty = true;
                     }
-                    predictor.on_key(mapped.intent, &screen);
-                    dirty = true;
                 }
                 Event::Resize(cols, rows) => {
                     screen.resize(Size {
@@ -199,7 +204,7 @@ impl TerminalGuard {
         let _ = crossterm::ansi_support::supports_ansi();
 
         terminal::enable_raw_mode().context("failed to enable raw mode")?;
-        execute!(io::stdout(), Hide, Clear(ClearType::All))
+        execute!(io::stdout(), Print("\x1b[?7l"), Hide, Clear(ClearType::All))
             .context("failed to prepare terminal")?;
         Ok(Self)
     }
@@ -225,7 +230,7 @@ impl KeyTrace {
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        let _ = execute!(io::stdout(), ResetColor, Show);
+        let _ = execute!(io::stdout(), Print("\x1b[?7h"), ResetColor, Show);
         let _ = terminal::disable_raw_mode();
     }
 }
