@@ -1,4 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+#[cfg(any(not(windows), test))]
+use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyIntent {
@@ -90,6 +92,29 @@ pub fn encode_key_with_mode(event: KeyEvent, application_cursor_keys: bool) -> E
 }
 
 #[cfg(any(not(windows), test))]
+pub fn encode_mouse(event: MouseEvent) -> Vec<u8> {
+    let (mut code, suffix) = mouse_code(event.kind);
+    if event.modifiers.contains(KeyModifiers::SHIFT) {
+        code += 4;
+    }
+    if has_escape_modifier(event.modifiers) {
+        code += 8;
+    }
+    if event.modifiers.contains(KeyModifiers::CONTROL) {
+        code += 16;
+    }
+
+    format!(
+        "\x1b[<{};{};{}{}",
+        code,
+        event.column.saturating_add(1),
+        event.row.saturating_add(1),
+        suffix
+    )
+    .into_bytes()
+}
+
+#[cfg(any(not(windows), test))]
 pub fn encode_paste(text: &str) -> Vec<u8> {
     let mut out = Vec::new();
     let mut chars = text.chars().peekable();
@@ -113,6 +138,30 @@ pub fn encode_paste(text: &str) -> Vec<u8> {
         }
     }
     out
+}
+
+#[cfg(any(not(windows), test))]
+fn mouse_code(kind: MouseEventKind) -> (u16, char) {
+    let press = match kind {
+        MouseEventKind::Down(button) => return (mouse_button(button), 'M'),
+        MouseEventKind::Up(button) => return (mouse_button(button), 'm'),
+        MouseEventKind::Drag(button) => mouse_button(button) + 32,
+        MouseEventKind::Moved => 35,
+        MouseEventKind::ScrollUp => 64,
+        MouseEventKind::ScrollDown => 65,
+        MouseEventKind::ScrollLeft => 66,
+        MouseEventKind::ScrollRight => 67,
+    };
+    (press, 'M')
+}
+
+#[cfg(any(not(windows), test))]
+fn mouse_button(button: MouseButton) -> u16 {
+    match button {
+        MouseButton::Left => 0,
+        MouseButton::Middle => 1,
+        MouseButton::Right => 2,
+    }
 }
 
 fn bytes(bytes: Vec<u8>, intent: KeyIntent) -> EncodedKey {
@@ -382,5 +431,45 @@ mod tests {
     fn paste_normalizes_newlines_and_controls() {
         assert_eq!(encode_paste("echo hi\r\n"), b"echo hi\r");
         assert_eq!(encode_paste("ab\u{7f}\u{3}"), &[b'a', b'b', 0x7f, 0x03]);
+    }
+
+    #[test]
+    fn encodes_sgr_mouse_events() {
+        assert_eq!(
+            encode_mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 9,
+                row: 4,
+                modifiers: KeyModifiers::NONE,
+            }),
+            b"\x1b[<0;10;5M"
+        );
+        assert_eq!(
+            encode_mouse(MouseEvent {
+                kind: MouseEventKind::Up(MouseButton::Left),
+                column: 9,
+                row: 4,
+                modifiers: KeyModifiers::NONE,
+            }),
+            b"\x1b[<0;10;5m"
+        );
+        assert_eq!(
+            encode_mouse(MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 0,
+                row: 0,
+                modifiers: KeyModifiers::CONTROL,
+            }),
+            b"\x1b[<81;1;1M"
+        );
+        assert_eq!(
+            encode_mouse(MouseEvent {
+                kind: MouseEventKind::Drag(MouseButton::Right),
+                column: 2,
+                row: 3,
+                modifiers: KeyModifiers::SHIFT | KeyModifiers::ALT,
+            }),
+            b"\x1b[<46;3;4M"
+        );
     }
 }
