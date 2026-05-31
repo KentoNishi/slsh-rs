@@ -463,14 +463,16 @@ impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = execute!(
             io::stdout(),
-            crossterm::style::Print(
-                "\x1b[0m\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1049l"
-            ),
+            crossterm::style::Print(terminal_restore_sequence()),
             ResetColor,
             Show
         );
         let _ = terminal::disable_raw_mode();
     }
+}
+
+fn terminal_restore_sequence() -> &'static str {
+    "\x1b[0m\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1049l\r\n"
 }
 
 #[cfg(test)]
@@ -516,6 +518,11 @@ mod tests {
         assert!(contains_terminal_mode_change(b"abc\x1b[?1002l"));
         assert!(!contains_terminal_mode_change(b"\x1b[31mred"));
         assert!(!contains_terminal_mode_change(b"\x1b[?25l"));
+    }
+
+    #[test]
+    fn terminal_restore_leaves_parent_prompt_on_next_line() {
+        assert!(terminal_restore_sequence().ends_with("\r\n"));
     }
 
     #[test]
