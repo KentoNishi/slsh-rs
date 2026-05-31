@@ -1,5 +1,5 @@
 use crate::key::KeyIntent;
-use crate::screen::{ActiveBuffer, Cell, Cursor, Screen};
+use crate::screen::{ActiveBuffer, Cell, Color, Cursor, Screen};
 use unicode_width::UnicodeWidthChar;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -201,8 +201,8 @@ impl BasePredictor {
             self.overlay.cells.push(OverlayCell {
                 pos: target,
                 cell: Cell {
-                    ch: ' ',
-                    style: predicted_style(under.style),
+                    ch: under.ch,
+                    style: predicted_deletion_style(under.style),
                 },
                 under,
             });
@@ -340,6 +340,13 @@ fn predicted_style(mut style: crate::screen::Style) -> crate::screen::Style {
     style
 }
 
+fn predicted_deletion_style(mut style: crate::screen::Style) -> crate::screen::Style {
+    style.fg = Color::Indexed(8);
+    style.dim = true;
+    style.strikethrough = true;
+    style
+}
+
 fn confirmed_matches_prediction(confirmed: Cell, predicted: Cell) -> bool {
     let mut predicted_confirmed_style = predicted.style;
     predicted_confirmed_style.dim = false;
@@ -347,7 +354,11 @@ fn confirmed_matches_prediction(confirmed: Cell, predicted: Cell) -> bool {
 }
 
 fn is_printable_prediction(cell: OverlayCell) -> bool {
-    cell.cell.ch != ' ' || cell.under.ch == ' '
+    !is_deletion_prediction(cell) && (cell.cell.ch != ' ' || cell.under.ch == ' ')
+}
+
+fn is_deletion_prediction(cell: OverlayCell) -> bool {
+    cell.cell.ch == cell.under.ch && cell.cell.style.strikethrough && cell.cell.style.dim
 }
 
 fn remote_cursor_accepts_suffix(
@@ -441,7 +452,7 @@ mod tests {
     }
 
     #[test]
-    fn backspace_hides_confirmed_owned_cell() {
+    fn backspace_marks_confirmed_owned_cell_for_deletion() {
         let mut screen = screen_with(b"$ ");
         let mut predictor = BasePredictor::new(true);
 
@@ -452,7 +463,10 @@ mod tests {
 
         assert_eq!(predictor.overlay.cells.len(), 1);
         assert_eq!(predictor.overlay.cells[0].pos, Cursor { row: 0, col: 2 });
-        assert_eq!(predictor.overlay.cells[0].cell.ch, ' ');
+        assert_eq!(predictor.overlay.cells[0].cell.ch, 'a');
+        assert_eq!(predictor.overlay.cells[0].cell.style.fg, Color::Indexed(8));
+        assert!(predictor.overlay.cells[0].cell.style.dim);
+        assert!(predictor.overlay.cells[0].cell.style.strikethrough);
         assert_eq!(predictor.overlay.cells[0].under.ch, 'a');
         assert_eq!(predictor.overlay.cursor, Some(Cursor { row: 0, col: 2 }));
     }

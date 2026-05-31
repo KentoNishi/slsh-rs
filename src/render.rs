@@ -182,6 +182,9 @@ fn set_style(out: &mut String, style: Style) {
     if style.underline {
         out.push_str("\x1b[4m");
     }
+    if style.strikethrough {
+        out.push_str("\x1b[9m");
+    }
     if style.reverse {
         out.push_str("\x1b[7m");
     }
@@ -288,6 +291,23 @@ mod tests {
         );
 
         assert!(out.contains("\x1b[2mD"));
+    }
+
+    #[test]
+    fn render_emits_strikethrough_style() {
+        let screen = screen_with(b"\x1b[9mS");
+        let mut renderer = Renderer::new();
+
+        let out = renderer.render(
+            &screen,
+            &Overlay {
+                enabled: true,
+                cells: Vec::new(),
+                cursor: None,
+            },
+        );
+
+        assert!(out.contains("\x1b[9mS"));
     }
 
     #[test]

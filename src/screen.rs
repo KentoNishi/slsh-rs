@@ -28,6 +28,7 @@ pub struct Style {
     pub dim: bool,
     pub bold: bool,
     pub underline: bool,
+    pub strikethrough: bool,
     pub reverse: bool,
 }
 
@@ -387,6 +388,7 @@ impl Screen {
                 1 => self.style.bold = true,
                 2 => self.style.dim = true,
                 4 => self.style.underline = true,
+                9 => self.style.strikethrough = true,
                 7 => self.style.reverse = true,
                 22 => {
                     self.style.bold = false;
@@ -394,6 +396,7 @@ impl Screen {
                 }
                 24 => self.style.underline = false,
                 27 => self.style.reverse = false,
+                29 => self.style.strikethrough = false,
                 30..=37 => self.style.fg = Color::Indexed((code - 30) as u8),
                 39 => self.style.fg = Color::Default,
                 40..=47 => self.style.bg = Color::Indexed((code - 40) as u8),
@@ -879,10 +882,20 @@ mod tests {
     fn tracks_basic_style() {
         let mut screen = Screen::new(Size { cols: 3, rows: 1 });
 
-        feed(&mut screen, b"\x1b[31;1;2mA\x1b[0mB");
+        feed(&mut screen, b"\x1b[31;1;2;9mA\x1b[29mB\x1b[0mC");
 
         assert_eq!(
             screen.cell(Cursor { row: 0, col: 0 }).style,
+            Style {
+                fg: Color::Indexed(1),
+                bold: true,
+                dim: true,
+                strikethrough: true,
+                ..Style::default()
+            }
+        );
+        assert_eq!(
+            screen.cell(Cursor { row: 0, col: 1 }).style,
             Style {
                 fg: Color::Indexed(1),
                 bold: true,
@@ -891,7 +904,7 @@ mod tests {
             }
         );
         assert_eq!(
-            screen.cell(Cursor { row: 0, col: 1 }).style,
+            screen.cell(Cursor { row: 0, col: 2 }).style,
             Style::default()
         );
     }
