@@ -36,13 +36,18 @@ pub struct TmuxKey {
 }
 
 pub fn shell_launcher(session_name: &str) -> String {
-    format!("tmux -CC new-session -s {}", quote_tmux_word(session_name))
+    format!(
+        "tmux -L {} -CC start-server \\; set-option -g default-terminal screen-256color \\; new-session -s {}",
+        quote_tmux_word(session_name),
+        quote_tmux_word(session_name)
+    )
 }
 
 pub fn command_launcher(session_name: &str, remote_command: &[String]) -> String {
     let command = remote_command.join(" ");
     format!(
-        "tmux -CC new-session -s {} {}",
+        "tmux -L {} -CC start-server \\; set-option -g default-terminal screen-256color \\; new-session -s {} {}",
+        quote_tmux_word(session_name),
         quote_tmux_word(session_name),
         quote_tmux_word(&command)
     )
@@ -448,14 +453,14 @@ mod tests {
     fn builds_launchers() {
         assert_eq!(
             shell_launcher("slsh-shell-1"),
-            "tmux -CC new-session -s 'slsh-shell-1'"
+            "tmux -L 'slsh-shell-1' -CC start-server \\; set-option -g default-terminal screen-256color \\; new-session -s 'slsh-shell-1'"
         );
         assert_eq!(
             command_launcher(
                 "slsh-cmd-1",
                 &["cd".into(), "repo".into(), "&&".into(), "bash".into()]
             ),
-            "tmux -CC new-session -s 'slsh-cmd-1' 'cd repo && bash'"
+            "tmux -L 'slsh-cmd-1' -CC start-server \\; set-option -g default-terminal screen-256color \\; new-session -s 'slsh-cmd-1' 'cd repo && bash'"
         );
     }
 
@@ -463,7 +468,7 @@ mod tests {
     fn command_launcher_quotes_single_quotes() {
         assert_eq!(
             command_launcher("name", &["echo".into(), "it's".into()]),
-            "tmux -CC new-session -s 'name' 'echo it'\\''s'"
+            "tmux -L 'name' -CC start-server \\; set-option -g default-terminal screen-256color \\; new-session -s 'name' 'echo it'\\''s'"
         );
     }
 

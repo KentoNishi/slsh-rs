@@ -7,6 +7,8 @@ using System.Threading;
 
 class ConptySmoke
 {
+    const short COLS = 80;
+    const short ROWS = 24;
     const uint EXTENDED_STARTUPINFO_PRESENT = 0x00080000;
     const uint CREATE_UNICODE_ENVIRONMENT = 0x00000400;
     const int STARTF_USESTDHANDLES = 0x00000100;
@@ -113,7 +115,7 @@ class ConptySmoke
         Check(CreatePipe(out outputRead, out outputWrite, IntPtr.Zero, 0), "CreatePipe output");
 
         IntPtr hpc;
-        int hr = CreatePseudoConsole(new COORD { X = 100, Y = 30 }, inputRead, outputWrite, 0, out hpc);
+        int hr = CreatePseudoConsole(new COORD { X = COLS, Y = ROWS }, inputRead, outputWrite, 0, out hpc);
         if (hr != 0) throw new InvalidOperationException("CreatePseudoConsole failed: 0x" + hr.ToString("x"));
         CloseHandle(inputRead);
         CloseHandle(outputWrite);
@@ -368,7 +370,7 @@ class ConptySmoke
 
     static string ReduceTerminal(string text)
     {
-        const int rows = 30, cols = 100;
+        const int rows = ROWS, cols = COLS;
         char[,] screen = new char[rows, cols];
         for (int r = 0; r < rows; r++)
             for (int c = 0; c < cols; c++)
