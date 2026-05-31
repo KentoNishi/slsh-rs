@@ -59,6 +59,8 @@ def main() -> int:
         "ctrl-left key forwarded": b"\x1b[1;5D" in ssh_input,
         "ctrl-right key forwarded": b"\x1b[1;5C" in ssh_input,
         "ctrl-delete key forwarded": b"\x1b[3;5~" in ssh_input,
+        "application up key forwarded": b"\x1bOA" in ssh_input,
+        "application down key forwarded": b"\x1bOB" in ssh_input,
         "login preamble captured": b"Welcome fake ssh login" in output,
         "prompt/output rendered": b"bash" in output or b"#" in output or b"$" in output,
     }
@@ -175,6 +177,16 @@ def run_slsh(env: dict[str, str]) -> bytes:
                 and b"\x1b[38;5;196mhot" in output
                 and "┌─┐" in reduce_terminal(output)
             ):
+                os.write(fd, b"printf '\\033[?1h'\r")
+                stage = "wait_application_mode"
+            elif stage == "wait_application_mode" and b"\x1b[?1h" in output:
+                os.write(fd, b"\x1b[A\x1b[B\x03")
+                stage = "sent_application_cursor"
+                stage_at = time.time()
+            elif stage == "sent_application_cursor" and time.time() - stage_at > 0.25:
+                os.write(fd, b"printf '\\033[?1l'\r")
+                stage = "wait_application_reset"
+            elif stage == "wait_application_reset" and b"\x1b[?1l" in output:
                 os.write(
                     fd,
                     b"printf '\\033[?1049h\\033[42m\\033[2JALT\\033[?1049l\\n'\r",

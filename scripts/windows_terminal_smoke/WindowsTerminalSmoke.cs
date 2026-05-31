@@ -95,6 +95,9 @@ class WindowsTerminalSmoke
                 RequireMissingRemoteFile(ssh, host, cancelledMarker, "ctrl-c cancelled marker");
                 Trace("ctrl-c passed");
 
+                Text("printf '\\033[?1h'");
+                Enter();
+                Thread.Sleep(500);
                 Text("cat > " + keyMarker);
                 Enter();
                 Thread.Sleep(500);
@@ -102,10 +105,15 @@ class WindowsTerminalSmoke
                 CtrlRight();
                 CtrlDelete();
                 CtrlX();
+                Up();
+                Down();
                 Enter();
                 CtrlD();
                 RequireRemoteFile(ssh, host, keyMarker, 40, "modified key marker");
                 RequireRemoteModifiedKeyBytes(ssh, host, keyMarker);
+                Text("printf '\\033[?1l'");
+                Enter();
+                Thread.Sleep(500);
                 Trace("modified keys passed");
 
                 Text("printf '\\033[31mSLSHWT%s\\033[0m\\n\\033)0\\016lqk\\017\\n' RED; touch " + renderMarker);
@@ -180,6 +188,16 @@ class WindowsTerminalSmoke
         Key(0x2E, 0x53, '\0', LEFT_CTRL_PRESSED);
     }
 
+    static void Up()
+    {
+        Key(0x26, 0x48, '\0');
+    }
+
+    static void Down()
+    {
+        Key(0x28, 0x50, '\0');
+    }
+
     static void Key(ushort vk, ushort scan, char ch)
     {
         Key(vk, scan, ch, 0);
@@ -224,7 +242,7 @@ class WindowsTerminalSmoke
 
     static void RequireRemoteModifiedKeyBytes(string ssh, string host, string path)
     {
-        string command = "python3 -c \"import pathlib,sys; data=pathlib.Path('" + path + "').read_bytes(); esc=bytes([27]); expected=esc+b'[1;5D'+esc+b'[1;5C'+esc+b'[3;5~'+bytes([24]); sys.exit(0 if expected in data else 1)\"";
+        string command = "python3 -c \"import pathlib,sys; data=pathlib.Path('" + path + "').read_bytes(); esc=bytes([27]); expected=esc+b'[1;5D'+esc+b'[1;5C'+esc+b'[3;5~'+bytes([24])+esc+b'OA'+esc+b'OB'; sys.exit(0 if expected in data else 1)\"";
         if (Run(ssh, SshArgs(host, command)) != 0)
             throw new InvalidOperationException("modified key bytes missing from " + path);
     }

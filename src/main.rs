@@ -113,7 +113,7 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
         while input::poll(Duration::from_millis(1)).context("failed to poll terminal input")? {
             match input::read().context("failed to read terminal input")? {
                 Some(InputEvent::Key(key)) => {
-                    let encoded = key::encode_key(key);
+                    let encoded = key::encode_key_with_mode(key, screen.application_cursor_keys());
                     let should_forward = match key.kind {
                         KeyEventKind::Press | KeyEventKind::Repeat => {
                             pressed_keys.insert(key_fingerprint(key));
