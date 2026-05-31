@@ -21,6 +21,9 @@ pub fn encode_key(event: KeyEvent) -> EncodedKey {
     if matches!(event.code, KeyCode::Char('g' | 'G')) && modifiers == KeyModifiers::CONTROL {
         return local(KeyIntent::TogglePrediction);
     }
+    if event.code == KeyCode::Char('\u{7}') && modifiers.is_empty() {
+        return local(KeyIntent::TogglePrediction);
+    }
 
     if modifiers.contains(KeyModifiers::CONTROL) {
         if let KeyCode::Char(ch) = event.code {
@@ -75,6 +78,10 @@ pub fn encode_key(event: KeyEvent) -> EncodedKey {
             text.extend(ch.to_string().as_bytes());
             modified_bytes(text, modifiers, KeyIntent::Printable(ch))
         }
+        KeyCode::Char(ch) => match control_byte(ch) {
+            Some(byte) => modified_bytes(vec![byte], modifiers, KeyIntent::Nonlinear),
+            None => local(KeyIntent::Unsupported),
+        },
         _ => local(KeyIntent::Unsupported),
     };
 
@@ -256,6 +263,10 @@ mod tests {
             encode_key(key(KeyCode::Char('c'), KeyModifiers::CONTROL)).bytes,
             &[0x03]
         );
+        assert_eq!(
+            encode_key(key(KeyCode::Char('\u{18}'), KeyModifiers::NONE)).bytes,
+            &[0x18]
+        );
     }
 
     #[test]
@@ -341,6 +352,11 @@ mod tests {
     #[test]
     fn ctrl_g_toggles_prediction_locally() {
         let encoded = encode_key(key(KeyCode::Char('g'), KeyModifiers::CONTROL));
+
+        assert_eq!(encoded.intent, KeyIntent::TogglePrediction);
+        assert!(encoded.bytes.is_empty());
+
+        let encoded = encode_key(key(KeyCode::Char('\u{7}'), KeyModifiers::NONE));
 
         assert_eq!(encoded.intent, KeyIntent::TogglePrediction);
         assert!(encoded.bytes.is_empty());
