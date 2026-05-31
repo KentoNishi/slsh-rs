@@ -6,11 +6,11 @@ mod tmux;
 mod transport;
 
 use anyhow::{Context, Result};
-use crossterm::cursor::{Hide, Show};
+use crossterm::cursor::Show;
 use crossterm::event::{self, Event, KeyEventKind};
 use crossterm::execute;
 use crossterm::style::{Print, ResetColor};
-use crossterm::terminal::{self, Clear, ClearType};
+use crossterm::terminal;
 use predict::BasePredictor;
 use render::Renderer;
 use screen::{Screen, Size};
@@ -205,7 +205,7 @@ impl TerminalGuard {
         let _ = crossterm::ansi_support::supports_ansi();
 
         terminal::enable_raw_mode().context("failed to enable raw mode")?;
-        execute!(io::stdout(), Print("\x1b[?7l"), Hide, Clear(ClearType::All))
+        execute!(io::stdout(), Print("\x1b[?7l\x1b[?25l\x1b[2J\x1b[H"))
             .context("failed to prepare terminal")?;
         Ok(Self)
     }
