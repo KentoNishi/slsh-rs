@@ -87,6 +87,8 @@ impl BasePredictor {
             if is_deletion_prediction(cell) {
                 if let Some(cell) = reconcile_deletion_prediction(cell, confirmed) {
                     kept.push(cell);
+                } else if confirmed_matches_prior_same_position(cell.pos, confirmed, &kept) {
+                    kept.push(cell);
                 }
                 continue;
             }
@@ -94,8 +96,13 @@ impl BasePredictor {
                 continue;
             }
             if confirmed != cell.under {
-                conflict = Some(index);
-                break;
+                if confirmed_matches_prior_same_position(cell.pos, confirmed, &kept) {
+                    kept.push(cell);
+                    continue;
+                } else {
+                    conflict = Some(index);
+                    break;
+                }
             }
             kept.push(cell);
         }
@@ -391,6 +398,18 @@ fn reconcile_deletion_prediction(cell: OverlayCell, confirmed: Cell) -> Option<O
     None
 }
 
+fn confirmed_matches_prior_same_position(
+    pos: Cursor,
+    confirmed: Cell,
+    prior: &[OverlayCell],
+) -> bool {
+    prior.iter().any(|cell| {
+        cell.pos == pos
+            && matches!(cell.kind, OverlayKind::Deletion { remote_seen: true })
+            && confirmed.ch == cell.cell.ch
+    })
+}
+
 fn is_printable_prediction(cell: OverlayCell) -> bool {
     cell.kind == OverlayKind::Printable && (cell.cell.ch != ' ' || cell.under.ch == ' ')
 }
@@ -588,6 +607,96 @@ mod tests {
         );
 
         feed(&mut screen, b"\x08 \x08");
+        predictor.reconcile(&screen);
+
+        assert!(predictor.overlay.cells.is_empty());
+        assert_eq!(predictor.overlay.cursor, None);
+    }
+
+    #[test]
+    fn replace_after_unconfirmed_backspace_survives_remote_catchup() {
+        let mut screen = screen_with(b"$ ");
+        let mut predictor = BasePredictor::new(true);
+
+        predictor.on_key(KeyIntent::Printable('a'), &screen);
+        predictor.on_key(KeyIntent::Backspace, &screen);
+        predictor.on_key(KeyIntent::Printable('b'), &screen);
+
+        assert_eq!(
+            predictor
+                .overlay
+                .cells
+                .iter()
+                .map(|cell| cell.cell.ch)
+                .collect::<String>(),
+            "ab"
+        );
+        assert_eq!(predictor.overlay.cursor, Some(Cursor { row: 0, col: 3 }));
+
+        feed(&mut screen, b"a");
+        predictor.reconcile(&screen);
+
+        assert_eq!(
+            predictor
+                .overlay
+                .cells
+                .iter()
+                .map(|cell| cell.cell.ch)
+                .collect::<String>(),
+            "ab"
+        );
+
+        feed(&mut screen, b"\x08 \x08");
+        predictor.reconcile(&screen);
+
+        assert_eq!(predictor.overlay.cells.len(), 1);
+        assert_eq!(predictor.overlay.cells[0].cell.ch, 'b');
+
+        feed(&mut screen, b"b");
+        predictor.reconcile(&screen);
+
+        assert!(predictor.overlay.cells.is_empty());
+        assert_eq!(predictor.overlay.cursor, None);
+    }
+
+    #[test]
+    fn repeated_replace_after_backspace_survives_remote_catchup() {
+        let mut screen = screen_with(b"$ ");
+        let mut predictor = BasePredictor::new(true);
+
+        predictor.on_key(KeyIntent::Printable('a'), &screen);
+        predictor.on_key(KeyIntent::Backspace, &screen);
+        predictor.on_key(KeyIntent::Printable('b'), &screen);
+        predictor.on_key(KeyIntent::Backspace, &screen);
+        predictor.on_key(KeyIntent::Printable('c'), &screen);
+
+        assert_eq!(
+            predictor
+                .overlay
+                .cells
+                .iter()
+                .map(|cell| cell.cell.ch)
+                .collect::<String>(),
+            "abc"
+        );
+
+        feed(&mut screen, b"a");
+        predictor.reconcile(&screen);
+        assert_eq!(predictor.overlay.cells.len(), 3);
+
+        feed(&mut screen, b"\x08 \x08b");
+        predictor.reconcile(&screen);
+        assert_eq!(
+            predictor
+                .overlay
+                .cells
+                .iter()
+                .map(|cell| cell.cell.ch)
+                .collect::<String>(),
+            "bc"
+        );
+
+        feed(&mut screen, b"\x08 \x08c");
         predictor.reconcile(&screen);
 
         assert!(predictor.overlay.cells.is_empty());
