@@ -164,7 +164,7 @@ def run_slsh(env: dict[str, str]) -> bytes:
             elif stage == "wait_hello" and b"hello" in output:
                 os.write(fd, b"printf '\\033[31mred\\033[0m\\n'\r")
                 os.write(fd, b"printf '\\033[38;5;196mhot\\033[0m\\n'\r")
-                os.write(fd, b"printf '\\033(0lqk\\033(B\\n'\r")
+                os.write(fd, b"printf '\\033)0\\016lqk\\017\\n'\r")
                 stage = "wait_features"
             elif (
                 stage == "wait_features"
