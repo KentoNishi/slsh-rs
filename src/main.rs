@@ -94,10 +94,12 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
         for chunk in transport.drain_chunks() {
             let before_active = screen.active();
             let before_application_cursor = screen.application_cursor_keys();
-            screen.feed(&mut parser, &chunk);
+            for byte in &chunk {
+                screen.feed(&mut parser, std::slice::from_ref(byte));
+                predictor.reconcile(&screen);
+            }
             #[cfg(not(windows))]
             mouse_protocol.feed(&chunk);
-            predictor.reconcile(&screen);
             let left_alternate = (before_active == ActiveBuffer::Alternate
                 && screen.active() == ActiveBuffer::Primary)
                 || contains_alternate_exit(&chunk);

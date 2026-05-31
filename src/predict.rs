@@ -85,14 +85,14 @@ impl BasePredictor {
         for (index, cell) in self.overlay.cells.iter().copied().enumerate() {
             let confirmed = screen.cell(cell.pos);
             if is_deletion_prediction(cell) {
-                if let Some(cell) = reconcile_deletion_prediction(cell, confirmed) {
+                if let Some(cell) = reconcile_deletion_prediction(cell, confirmed, screen) {
                     kept.push(cell);
                 } else if confirmed_matches_prior_same_position(cell.pos, confirmed, &kept) {
                     kept.push(cell);
                 }
                 continue;
             }
-            if confirmed == cell.cell || confirmed_matches_prediction(confirmed, cell.cell) {
+            if printable_prediction_confirmed(cell, confirmed, screen) {
                 continue;
             }
             if confirmed != cell.under {
@@ -382,10 +382,47 @@ fn confirmed_matches_prediction(confirmed: Cell, predicted: Cell) -> bool {
     confirmed.ch == predicted.ch && confirmed.style == predicted_confirmed_style
 }
 
-fn reconcile_deletion_prediction(cell: OverlayCell, confirmed: Cell) -> Option<OverlayCell> {
+fn printable_prediction_confirmed(cell: OverlayCell, confirmed: Cell, screen: &Screen) -> bool {
+    if !is_printable_prediction(cell) {
+        return false;
+    }
+    if confirmed != cell.cell && !confirmed_matches_prediction(confirmed, cell.cell) {
+        return false;
+    }
+    if cell.cell.ch == ' ' && confirmed == cell.under {
+        return cursor_reached(
+            screen.cursor(),
+            advance_cursor(screen, cell.pos, width_of(cell.cell.ch)),
+            screen,
+        );
+    }
+    true
+}
+
+fn reconcile_deletion_prediction(
+    cell: OverlayCell,
+    confirmed: Cell,
+    screen: &Screen,
+) -> Option<OverlayCell> {
     let OverlayKind::Deletion { remote_seen } = cell.kind else {
         return None;
     };
+    if cell.cell.ch == ' ' && confirmed == cell.under {
+        let remote_echoed_space = cursor_reached(
+            screen.cursor(),
+            advance_cursor(screen, cell.pos, width_of(cell.cell.ch)),
+            screen,
+        );
+        if remote_seen && !remote_echoed_space {
+            return None;
+        }
+        return Some(OverlayCell {
+            kind: OverlayKind::Deletion {
+                remote_seen: remote_seen || remote_echoed_space,
+            },
+            ..cell
+        });
+    }
     if confirmed.ch == cell.cell.ch {
         return Some(OverlayCell {
             kind: OverlayKind::Deletion { remote_seen: true },
@@ -411,7 +448,7 @@ fn confirmed_matches_prior_same_position(
 }
 
 fn is_printable_prediction(cell: OverlayCell) -> bool {
-    cell.kind == OverlayKind::Printable && (cell.cell.ch != ' ' || cell.under.ch == ' ')
+    cell.kind == OverlayKind::Printable
 }
 
 fn is_deletion_prediction(cell: OverlayCell) -> bool {
@@ -434,6 +471,14 @@ fn cursor_on_overlay_rows(cursor: Cursor, cells: &[OverlayCell]) -> bool {
         return false;
     };
     (first.pos.row..=last.pos.row).contains(&cursor.row)
+}
+
+fn cursor_reached(cursor: Cursor, target: Cursor, screen: &Screen) -> bool {
+    cursor_index(cursor, screen) >= cursor_index(target, screen)
+}
+
+fn cursor_index(cursor: Cursor, screen: &Screen) -> u32 {
+    cursor.row as u32 * screen.size().cols as u32 + cursor.col as u32
 }
 
 pub fn hidden_input_guard(screen: &Screen) -> bool {
@@ -471,6 +516,14 @@ mod tests {
     fn feed(screen: &mut Screen, text: &[u8]) {
         let mut parser = vte::Parser::new();
         screen.feed(&mut parser, text);
+    }
+
+    fn feed_each_reconcile(screen: &mut Screen, predictor: &mut BasePredictor, text: &[u8]) {
+        let mut parser = vte::Parser::new();
+        for byte in text {
+            screen.feed(&mut parser, std::slice::from_ref(byte));
+            predictor.reconcile(screen);
+        }
     }
 
     #[test]
@@ -654,6 +707,99 @@ mod tests {
 
         feed(&mut screen, b"b");
         predictor.reconcile(&screen);
+
+        assert!(predictor.overlay.cells.is_empty());
+        assert_eq!(predictor.overlay.cursor, None);
+    }
+
+    #[test]
+    fn space_waits_for_remote_cursor_progress() {
+        let mut screen = screen_with(b"$ ");
+        let mut predictor = BasePredictor::new(true);
+
+        predictor.on_key(KeyIntent::Printable(' '), &screen);
+        predictor.reconcile(&screen);
+
+        assert_eq!(predictor.overlay.cells.len(), 1);
+        assert_eq!(predictor.overlay.cells[0].cell.ch, ' ');
+
+        feed(&mut screen, b" ");
+        predictor.reconcile(&screen);
+
+        assert!(predictor.overlay.cells.is_empty());
+        assert_eq!(predictor.overlay.cursor, None);
+    }
+
+    #[test]
+    fn partial_echo_before_space_keeps_space_prediction() {
+        let mut screen = screen_with(b"$ ");
+        let mut predictor = BasePredictor::new(true);
+
+        for ch in "a b".chars() {
+            predictor.on_key(KeyIntent::Printable(ch), &screen);
+        }
+
+        feed(&mut screen, b"a");
+        predictor.reconcile(&screen);
+
+        assert_eq!(
+            predictor
+                .overlay
+                .cells
+                .iter()
+                .map(|cell| cell.cell.ch)
+                .collect::<String>(),
+            " b"
+        );
+    }
+
+    #[test]
+    fn backspaced_blank_space_clears_after_remote_cursor_returns() {
+        let mut screen = screen_with(b"$ ");
+        let mut predictor = BasePredictor::new(true);
+
+        predictor.on_key(KeyIntent::Printable(' '), &screen);
+        predictor.on_key(KeyIntent::Backspace, &screen);
+        predictor.reconcile(&screen);
+
+        assert_eq!(predictor.overlay.cells.len(), 1);
+        assert_eq!(
+            predictor.overlay.cells[0].kind,
+            OverlayKind::Deletion { remote_seen: false }
+        );
+
+        feed_each_reconcile(&mut screen, &mut predictor, b" \x08");
+
+        assert!(predictor.overlay.cells.is_empty());
+        assert_eq!(predictor.overlay.cursor, None);
+    }
+
+    #[test]
+    fn previous_echo_does_not_clear_backspaced_blank_space() {
+        let mut screen = screen_with(b"$ ");
+        let mut predictor = BasePredictor::new(true);
+
+        predictor.on_key(KeyIntent::Printable('a'), &screen);
+        predictor.on_key(KeyIntent::Printable(' '), &screen);
+        predictor.on_key(KeyIntent::Backspace, &screen);
+
+        feed_each_reconcile(&mut screen, &mut predictor, b"a");
+
+        assert_eq!(
+            predictor
+                .overlay
+                .cells
+                .iter()
+                .map(|cell| cell.cell.ch)
+                .collect::<String>(),
+            " "
+        );
+        assert_eq!(
+            predictor.overlay.cells[0].kind,
+            OverlayKind::Deletion { remote_seen: false }
+        );
+
+        feed_each_reconcile(&mut screen, &mut predictor, b" \x08");
 
         assert!(predictor.overlay.cells.is_empty());
         assert_eq!(predictor.overlay.cursor, None);
