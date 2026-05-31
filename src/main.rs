@@ -1,3 +1,4 @@
+mod input;
 mod predict;
 mod render;
 mod screen;
@@ -7,10 +8,11 @@ mod transport;
 
 use anyhow::{Context, Result};
 use crossterm::cursor::Show;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::style::{Print, ResetColor};
 use crossterm::terminal;
+use input::InputEvent;
 use predict::BasePredictor;
 use render::Renderer;
 use screen::{Screen, Size};
@@ -109,9 +111,9 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
             }
         }
 
-        while event::poll(Duration::from_millis(1)).context("failed to poll terminal input")? {
-            match event::read().context("failed to read terminal input")? {
-                Event::Key(key) => {
+        while input::poll(Duration::from_millis(1)).context("failed to poll terminal input")? {
+            match input::read().context("failed to read terminal input")? {
+                Some(InputEvent::Key(key)) => {
                     let mapped = tmux::key_to_tmux(key, active_pane.as_deref());
                     let should_forward = match key.kind {
                         KeyEventKind::Press | KeyEventKind::Repeat => {
@@ -135,7 +137,7 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
                         dirty = true;
                     }
                 }
-                Event::Resize(cols, rows) => {
+                Some(InputEvent::Resize(cols, rows)) => {
                     screen.resize(Size {
                         cols: cols.max(1),
                         rows: rows.max(1),
@@ -145,7 +147,8 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
                     transport.write_command(&tmux::resize_command(cols.max(1), rows.max(1)))?;
                     dirty = true;
                 }
-                Event::Paste(text) => {
+                #[cfg(not(windows))]
+                Some(InputEvent::Paste(text)) => {
                     let command = tmux::paste_to_tmux(&text, active_pane.as_deref());
                     key_trace.log(format_args!(
                         "paste {:?} pane {:?} command {:?}",
@@ -157,7 +160,7 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
                     predictor.clear();
                     dirty = true;
                 }
-                _ => {}
+                None => {}
             }
         }
 
