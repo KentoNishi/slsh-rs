@@ -197,7 +197,7 @@ fn compositor_ssh_args(parsed: &ParsedSshArgs) -> Vec<String> {
 }
 
 fn initial_terminal_cursor(size: Size) -> screen::Cursor {
-    query_terminal_cursor(Duration::from_millis(75))
+    query_terminal_cursor(Duration::from_millis(250))
         .ok()
         .map(|(col, row)| screen::Cursor {
             row: row.min(size.rows.saturating_sub(1)),
