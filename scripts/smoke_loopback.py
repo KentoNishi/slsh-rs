@@ -26,6 +26,7 @@ def main() -> int:
     seeded_cursor_output = run_seeded_cursor_overlay()
     scrolled_overlay_output = run_scrolled_overlay()
     app_prefix_output = run_app_prefix_guard()
+    app_cursor_output = run_app_cursor_overlay()
 
     failed = []
     if marker not in output:
@@ -46,6 +47,8 @@ def main() -> int:
         failed.append("scrolled overlay row")
     if b"Q" in app_prefix_output:
         failed.append("nonlinear prefix suppresses next printable overlay")
+    if b"Z" not in app_cursor_output or b"\x1b[2;1H" not in app_cursor_output:
+        failed.append("app cursor overlay row")
 
     if failed:
         sys.stderr.write("loopback smoke failed: marker missing\n")
@@ -65,6 +68,8 @@ def main() -> int:
         sys.stderr.buffer.write(scrolled_overlay_output)
         sys.stderr.write("\nApp prefix bytes:\n")
         sys.stderr.buffer.write(app_prefix_output)
+        sys.stderr.write("\nApp cursor bytes:\n")
+        sys.stderr.buffer.write(app_cursor_output)
         sys.stderr.write("\n")
         return 1
 
@@ -381,7 +386,7 @@ def run_app_prefix_guard() -> bytes:
             if not sent_app and (b"$" in output or b"#" in output):
                 os.write(fd, b"\x1b[200~" + app + b"\x1b[201~")
                 sent_app = True
-            if sent_app and not sent_prefix and b"APP" in output:
+            if sent_app and not sent_prefix and b"\x1b[HAPP" in output:
                 prefix_start = len(output)
                 os.write(fd, b"\x02Q")
                 sent_prefix = True
@@ -395,6 +400,69 @@ def run_app_prefix_guard() -> bytes:
             pass
 
     return output[prefix_start:]
+
+
+def run_app_cursor_overlay() -> bytes:
+    argv = [os.path.join(ROOT, "target", "debug", "slsh"), "ignored-host"]
+    env = os.environ.copy()
+    env["SLSH_LOOPBACK"] = "1"
+    env["SLSH_DELAY_MS"] = "1000"
+    env.setdefault("SHELL", "/bin/sh")
+
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.execvpe(argv[0], argv, env)
+
+    termios.tcflush(fd, termios.TCIOFLUSH)
+    os.set_blocking(fd, False)
+    fcntl_rows_cols(fd, 24, 80)
+
+    app = (
+        "python3 -c 'import os,sys,tty,time;"
+        "tty.setraw(0);"
+        "sys.stdout.write(\"\\033[?1049h\\033[?1h\\033[H\\033[2J"
+        "HEADER\\r\\033[23d^G Help\\r\\033[24d^X Exit\\r\\033[22d\\033[2d\");"
+        "sys.stdout.flush();"
+        "os.read(0,1);"
+        "time.sleep(.2);"
+        "sys.stdout.write(\"\\033[?1l\\033[?1049l\");"
+        "sys.stdout.flush()'\r"
+    ).encode()
+
+    output = b""
+    sent_app = False
+    sent_probe = False
+    probe_at = 0.0
+    probe_start = 0
+    deadline = time.time() + 12
+    try:
+        while time.time() < deadline:
+            readable, _, _ = select.select([fd], [], [], 0.02)
+            if readable:
+                try:
+                    output += os.read(fd, 4096)
+                except BlockingIOError:
+                    pass
+                except OSError:
+                    return output[probe_start:]
+
+            if not sent_app and (b"$" in output or b"#" in output):
+                os.write(fd, b"\x1b[200~" + app + b"\x1b[201~")
+                sent_app = True
+            if sent_app and not sent_probe and b"\x1b[24d^X Exit" in output:
+                probe_start = len(output)
+                os.write(fd, b"Z")
+                sent_probe = True
+                probe_at = time.time()
+            if sent_probe and time.time() - probe_at >= 0.25:
+                return output[probe_start:]
+    finally:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+
+    return output[probe_start:]
 
 
 def run_and_collect(argv: list[str], env: dict[str, str]) -> bytes:

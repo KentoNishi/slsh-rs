@@ -532,10 +532,12 @@ impl Perform for Screen {
             'B' => self.move_relative(param(params, 0, 1) as i32, 0),
             'C' => self.move_relative(0, param(params, 0, 1) as i32),
             'D' => self.move_relative(0, -(param(params, 0, 1) as i32)),
+            'G' | '`' => self.move_cursor(self.cursor.row, param(params, 0, 1).saturating_sub(1)),
             'H' | 'f' => self.move_cursor(
                 param(params, 0, 1).saturating_sub(1),
                 param(params, 1, 1).saturating_sub(1),
             ),
+            'd' => self.move_cursor(param(params, 0, 1).saturating_sub(1), self.cursor.col),
             'J' => self.erase_display(param(params, 0, 0)),
             'K' => self.erase_line(param(params, 0, 0)),
             'L' => self.insert_lines(param(params, 0, 1)),
@@ -818,6 +820,38 @@ mod tests {
 
         assert_eq!(screen.cell(Cursor { row: 0, col: 0 }).ch, 'Z');
         assert_eq!(screen.cell(Cursor { row: 1, col: 0 }).ch, 'y');
+    }
+
+    #[test]
+    fn handles_absolute_row_and_column_cursor_motions() {
+        let mut screen = Screen::new(Size { cols: 8, rows: 4 });
+
+        feed(&mut screen, b"\x1b[3dA\x1b[5GB\x1b[2`C");
+
+        assert_eq!(screen.cell(Cursor { row: 2, col: 0 }).ch, 'A');
+        assert_eq!(screen.cell(Cursor { row: 2, col: 4 }).ch, 'B');
+        assert_eq!(screen.cell(Cursor { row: 2, col: 1 }).ch, 'C');
+        assert_eq!(screen.cursor(), Cursor { row: 2, col: 2 });
+    }
+
+    #[test]
+    fn nano_style_vertical_positioning_leaves_cursor_on_edit_row() {
+        let mut screen = Screen::new(Size { cols: 40, rows: 24 });
+
+        feed(
+            &mut screen,
+            b"\x1b[?1049h\x1b[H\x1b[2J\
+              GNU nano\r\
+              \x1b[23d^G Help\r\
+              \x1b[24d^X Exit\r\
+              \x1b[22d\x1b[2d",
+        );
+
+        assert_eq!(screen.cursor(), Cursor { row: 1, col: 0 });
+        assert_eq!(screen.cell(Cursor { row: 0, col: 0 }).ch, 'G');
+        assert_eq!(screen.cell(Cursor { row: 1, col: 0 }).ch, ' ');
+        assert_eq!(screen.cell(Cursor { row: 22, col: 0 }).ch, '^');
+        assert_eq!(screen.cell(Cursor { row: 23, col: 0 }).ch, '^');
     }
 
     #[test]
