@@ -211,7 +211,7 @@ fn set_style(out: &mut String, style: Style) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::predict::{Overlay, OverlayCell};
+    use crate::predict::{Overlay, OverlayCell, OverlayKind};
     use crate::screen::{Cell, Size};
 
     fn screen_with(text: &[u8]) -> Screen {
@@ -378,6 +378,7 @@ mod tests {
                     style: Default::default(),
                 },
                 under: Cell::default(),
+                kind: OverlayKind::Printable,
             }],
             cursor: Some(Cursor { row: 0, col: 1 }),
         };
