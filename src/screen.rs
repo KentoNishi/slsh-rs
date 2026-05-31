@@ -77,13 +77,17 @@ struct Buffer {
 
 impl Screen {
     pub fn new(size: Size) -> Self {
+        Self::new_at(size, Cursor::default())
+    }
+
+    pub fn new_at(size: Size, cursor: Cursor) -> Self {
         let bottom = size.rows.saturating_sub(1);
-        Self {
+        let mut screen = Self {
             size,
             primary: Buffer::new(size),
             alternate: Buffer::new(size),
             active: ActiveBuffer::Primary,
-            cursor: Cursor::default(),
+            cursor,
             saved_cursor: Cursor::default(),
             scroll_top: 0,
             scroll_bottom: bottom,
@@ -93,7 +97,9 @@ impl Screen {
             g1_dec_special_graphics: false,
             using_g1: false,
             application_cursor_keys: false,
-        }
+        };
+        screen.clamp_cursor();
+        screen
     }
 
     pub fn size(&self) -> Size {
@@ -780,6 +786,17 @@ mod tests {
         assert_eq!(screen.cell(Cursor { row: 0, col: 0 }).ch, 'a');
         assert_eq!(screen.cell(Cursor { row: 0, col: 1 }).ch, 'b');
         assert_eq!(screen.cursor(), Cursor { row: 0, col: 2 });
+    }
+
+    #[test]
+    fn starts_at_initial_cursor() {
+        let mut screen = Screen::new_at(Size { cols: 5, rows: 3 }, Cursor { row: 2, col: 1 });
+
+        feed(&mut screen, b"ok");
+
+        assert_eq!(screen.cell(Cursor { row: 2, col: 1 }).ch, 'o');
+        assert_eq!(screen.cell(Cursor { row: 2, col: 2 }).ch, 'k');
+        assert_eq!(screen.cursor(), Cursor { row: 2, col: 3 });
     }
 
     #[test]

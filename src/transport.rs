@@ -13,7 +13,7 @@ const LOOPBACK_ENV: &str = "SLSH_LOOPBACK";
 pub struct Transport {
     child: Box<dyn Child + Send + Sync>,
     master: Box<dyn MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
+    writes: Sender<Vec<u8>>,
     chunks: Receiver<Vec<u8>>,
     reader_done: Receiver<()>,
     reader_finished: bool,
@@ -70,15 +70,17 @@ impl Transport {
             .with_context(|| format!("failed to open {context} pty writer"))?;
         let (tx, rx) = mpsc::channel();
         let (done_tx, done_rx) = mpsc::channel();
+        let (write_tx, write_rx) = mpsc::channel();
         let _ = thread::spawn(move || {
             read_stream(reader, tx, debug_network_delay);
             let _ = done_tx.send(());
         });
+        let _ = thread::spawn(move || write_stream(writer, write_rx, debug_network_delay));
 
         Ok(Self {
             child,
             master: pair.master,
-            writer,
+            writes: write_tx,
             chunks: rx,
             reader_done: done_rx,
             reader_finished: false,
@@ -88,11 +90,12 @@ impl Transport {
     }
 
     pub fn write(&mut self, bytes: &[u8]) -> Result<()> {
-        sleep_debug_delay(self.debug_network_delay);
-        self.writer
-            .write_all(bytes)
-            .context("failed to write transport pty")?;
-        self.writer.flush().context("failed to flush transport pty")
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        self.writes
+            .send(bytes.to_vec())
+            .context("failed to queue transport write")
     }
 
     pub fn resize(&mut self, cols: u16, rows: u16) -> Result<()> {
@@ -164,6 +167,23 @@ fn parse_debug_network_delay(value: Option<OsString>) -> Duration {
 fn sleep_debug_delay(delay: Duration) {
     if !delay.is_zero() {
         thread::sleep(delay);
+    }
+}
+
+fn write_stream(
+    mut stream: Box<dyn Write + Send>,
+    rx: Receiver<Vec<u8>>,
+    debug_network_delay: Duration,
+) {
+    while let Ok(bytes) = rx.recv() {
+        sleep_debug_delay(debug_network_delay);
+        if stream
+            .write_all(&bytes)
+            .and_then(|_| stream.flush())
+            .is_err()
+        {
+            break;
+        }
     }
 }
 

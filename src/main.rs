@@ -23,8 +23,11 @@ use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::{self, IsTerminal, Write};
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use transport::Transport;
+
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 
 fn main() {
     let code = match run() {
@@ -62,10 +65,11 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
     let ssh_args = compositor_ssh_args(&parsed);
 
     let (cols, rows) = terminal::size().context("failed to read terminal size")?;
-    let mut screen = Screen::new(Size {
+    let size = Size {
         cols: cols.max(1),
         rows: rows.max(1),
-    });
+    };
+    let mut screen = Screen::new_at(size, initial_terminal_cursor(size));
     let mut parser = vte::Parser::new();
     let mut predictor = BasePredictor::new(parsed.slsh.predict);
     let mut renderer = Renderer::new();
@@ -190,6 +194,126 @@ fn compositor_ssh_args(parsed: &ParsedSshArgs) -> Vec<String> {
     args
 }
 
+fn initial_terminal_cursor(size: Size) -> screen::Cursor {
+    query_terminal_cursor(Duration::from_millis(75))
+        .ok()
+        .map(|(col, row)| screen::Cursor {
+            row: row.min(size.rows.saturating_sub(1)),
+            col: col.min(size.cols.saturating_sub(1)),
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(windows)]
+fn query_terminal_cursor(_timeout: Duration) -> io::Result<(u16, u16)> {
+    crossterm::cursor::position()
+}
+
+#[cfg(unix)]
+fn query_terminal_cursor(timeout: Duration) -> io::Result<(u16, u16)> {
+    let stdin = io::stdin();
+    let fd = stdin.as_raw_fd();
+    let mut original = std::mem::MaybeUninit::<libc::termios>::uninit();
+    if unsafe { libc::tcgetattr(fd, original.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    let original = unsafe { original.assume_init() };
+    let mut raw = original;
+    unsafe { libc::cfmakeraw(&mut raw) };
+    if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let _restore = TermiosRestore {
+        fd,
+        termios: original,
+    };
+
+    let mut stdout = io::stdout();
+    stdout.write_all(b"\x1b[6n")?;
+    stdout.flush()?;
+
+    read_cursor_response(fd, timeout)
+}
+
+#[cfg(unix)]
+struct TermiosRestore {
+    fd: i32,
+    termios: libc::termios,
+}
+
+#[cfg(unix)]
+impl Drop for TermiosRestore {
+    fn drop(&mut self) {
+        let _ = unsafe { libc::tcsetattr(self.fd, libc::TCSANOW, &self.termios) };
+    }
+}
+
+#[cfg(unix)]
+fn read_cursor_response(fd: i32, timeout: Duration) -> io::Result<(u16, u16)> {
+    let deadline = Instant::now() + timeout;
+    let mut response = Vec::with_capacity(32);
+    while Instant::now() < deadline && response.len() < 32 {
+        if !wait_readable(fd, deadline.saturating_duration_since(Instant::now()))? {
+            break;
+        }
+
+        let mut byte = 0u8;
+        let read = unsafe { libc::read(fd, (&mut byte as *mut u8).cast(), 1) };
+        if read < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if read == 0 {
+            break;
+        }
+        response.push(byte);
+        if byte == b'R' {
+            break;
+        }
+    }
+
+    parse_cursor_response(&response)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "cursor position unavailable"))
+}
+
+#[cfg(unix)]
+fn wait_readable(fd: i32, timeout: Duration) -> io::Result<bool> {
+    let mut readfds = unsafe { std::mem::zeroed::<libc::fd_set>() };
+    unsafe {
+        libc::FD_ZERO(&mut readfds);
+        libc::FD_SET(fd, &mut readfds);
+    }
+
+    let mut timeout = libc::timeval {
+        tv_sec: timeout.as_secs().min(i64::MAX as u64) as _,
+        tv_usec: timeout.subsec_micros() as _,
+    };
+    let ready = unsafe {
+        libc::select(
+            fd + 1,
+            &mut readfds,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut timeout,
+        )
+    };
+    if ready < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(ready > 0)
+    }
+}
+
+#[cfg(unix)]
+fn parse_cursor_response(bytes: &[u8]) -> Option<(u16, u16)> {
+    let response = std::str::from_utf8(bytes).ok()?;
+    let body = response.strip_prefix("\x1b[")?.strip_suffix('R')?;
+    let (row, col) = body.split_once(';')?;
+    let row = row.parse::<u16>().ok()?.saturating_sub(1);
+    let col = col.parse::<u16>().ok()?.saturating_sub(1);
+    Some((col, row))
+}
+
 fn key_fingerprint(key: KeyEvent) -> String {
     let mut modifiers = key.modifiers;
     let code = match key.code {
@@ -286,5 +410,12 @@ mod tests {
         assert!(contains_alternate_exit(b"abc\x1b[?1047ldef"));
         assert!(contains_alternate_exit(b"\x1b[?47l"));
         assert!(!contains_alternate_exit(b"\x1b[?1049h"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parses_terminal_cursor_response() {
+        assert_eq!(parse_cursor_response(b"\x1b[10;30R"), Some((29, 9)));
+        assert_eq!(parse_cursor_response(b"nope"), None);
     }
 }
