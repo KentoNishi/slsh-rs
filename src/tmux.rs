@@ -8,6 +8,18 @@ pub enum ControlEvent {
     Notification(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamEvent {
+    Raw(Vec<u8>),
+    Control(ControlEvent),
+}
+
+#[derive(Debug, Default)]
+pub struct StreamParser {
+    buffer: Vec<u8>,
+    control_started: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyIntent {
     Printable(char),
@@ -61,8 +73,48 @@ pub fn parse_control_line(line: &str) -> Option<ControlEvent> {
         .then(|| ControlEvent::Notification(line.to_string()))
 }
 
-pub fn is_control_line(line: &str) -> bool {
-    normalize_control_line(line).is_some()
+impl StreamParser {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn push(&mut self, bytes: &[u8]) -> Vec<StreamEvent> {
+        self.buffer.extend_from_slice(bytes);
+        let mut events = Vec::new();
+
+        loop {
+            if !self.control_started {
+                match find_control_start(&self.buffer) {
+                    Some(0) => self.control_started = true,
+                    Some(index) => {
+                        events.push(StreamEvent::Raw(self.buffer.drain(..index).collect()));
+                        self.control_started = true;
+                    }
+                    None => {
+                        let emit = raw_emit_len(&self.buffer);
+                        if emit > 0 {
+                            events.push(StreamEvent::Raw(self.buffer.drain(..emit).collect()));
+                        }
+                        break;
+                    }
+                }
+            }
+
+            let Some(line_end) = self.buffer.iter().position(|byte| *byte == b'\n') else {
+                break;
+            };
+            let line: Vec<u8> = self.buffer.drain(..=line_end).collect();
+            let text = String::from_utf8_lossy(&line);
+            let text = text.trim_end_matches('\n');
+            if let Some(event) = parse_control_line(text) {
+                events.push(StreamEvent::Control(event));
+            } else {
+                events.push(StreamEvent::Raw(line));
+            }
+        }
+
+        events
+    }
 }
 
 pub fn key_to_tmux(event: KeyEvent, pane: Option<&str>) -> TmuxKey {
@@ -292,6 +344,28 @@ fn normalize_control_line(line: &str) -> Option<&str> {
     Some(line.strip_suffix("\x1b\\").unwrap_or(line))
 }
 
+fn find_control_start(bytes: &[u8]) -> Option<usize> {
+    const DCS_PREFIX: &[u8] = b"\x1bP1000p%";
+    bytes
+        .windows(DCS_PREFIX.len())
+        .position(|window| window == DCS_PREFIX)
+        .or_else(|| {
+            bytes.iter().enumerate().find_map(|(index, byte)| {
+                (*byte == b'%' && (index == 0 || matches!(bytes[index - 1], b'\r' | b'\n')))
+                    .then_some(index)
+            })
+        })
+}
+
+fn raw_emit_len(bytes: &[u8]) -> usize {
+    const DCS_PREFIX: &[u8] = b"\x1bP1000p%";
+    let keep = (1..DCS_PREFIX.len())
+        .rev()
+        .find(|len| bytes.ends_with(&DCS_PREFIX[..*len]))
+        .unwrap_or(0);
+    bytes.len().saturating_sub(keep)
+}
+
 fn unquote_output(value: &str) -> String {
     if value.len() >= 2 && value.starts_with('"') && value.ends_with('"') {
         value[1..value.len() - 1].to_string()
@@ -445,6 +519,35 @@ mod tests {
             parse_control_line("%session-changed $1 1"),
             Some(ControlEvent::Notification("%session-changed $1 1".into()))
         );
+    }
+
+    #[test]
+    fn stream_parser_splits_raw_preamble_from_control() {
+        let mut parser = StreamParser::new();
+        let events = parser.push(b"Welcome\r\nprompt# \x1bP1000p%output %1 hi\r\n");
+
+        assert_eq!(
+            events,
+            vec![
+                StreamEvent::Raw(b"Welcome\r\nprompt# ".to_vec()),
+                StreamEvent::Control(ControlEvent::Output {
+                    pane: "%1".into(),
+                    bytes: b"hi".to_vec()
+                })
+            ]
+        );
+    }
+
+    #[test]
+    fn stream_parser_handles_split_control_prefix() {
+        let mut parser = StreamParser::new();
+        assert_eq!(
+            parser.push(b"abc\x1bP100"),
+            vec![StreamEvent::Raw(b"abc".to_vec())]
+        );
+        let events = parser.push(b"0p%exit\r\n");
+
+        assert_eq!(events, vec![StreamEvent::Control(ControlEvent::Exit)]);
     }
 
     #[test]
