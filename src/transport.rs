@@ -1,51 +1,69 @@
 use anyhow::{Context, Result};
+use portable_pty::{native_pty_system, Child, CommandBuilder, ExitStatus, MasterPty, PtySize};
 use std::io::{Read, Write};
-use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
+use std::process::ExitStatus as ProcessExitStatus;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
 pub struct Transport {
-    child: Child,
-    stdin: ChildStdin,
+    child: Box<dyn Child + Send + Sync>,
+    master: Box<dyn MasterPty + Send>,
+    writer: Box<dyn Write + Send>,
     chunks: Receiver<Vec<u8>>,
     reader: Option<JoinHandle<()>>,
 }
 
 impl Transport {
-    pub fn spawn(args: &[String]) -> Result<Self> {
-        let mut child = Command::new("ssh")
-            .args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .context("failed to spawn ssh")?;
+    pub fn spawn(args: &[String], cols: u16, rows: u16) -> Result<Self> {
+        let pty = native_pty_system();
+        let pair = pty
+            .openpty(pty_size(cols, rows))
+            .context("failed to open ssh pty")?;
+        let mut command = CommandBuilder::new("ssh");
+        command.args(args);
+        if std::env::var_os("TERM")
+            .and_then(|term| term.into_string().ok())
+            .filter(|term| !term.is_empty() && term != "dumb")
+            .is_none()
+        {
+            command.env("TERM", "xterm-256color");
+        }
 
-        let stdin = child.stdin.take().context("failed to open ssh stdin")?;
-        let stdout = child.stdout.take().context("failed to open ssh stdout")?;
-        let stderr = child.stderr.take().context("failed to open ssh stderr")?;
+        let child = pair
+            .slave
+            .spawn_command(command)
+            .context("failed to spawn ssh")?;
+        let reader = pair
+            .master
+            .try_clone_reader()
+            .context("failed to open ssh pty reader")?;
+        let writer = pair
+            .master
+            .take_writer()
+            .context("failed to open ssh pty writer")?;
         let (tx, rx) = mpsc::channel();
-        let stderr_tx = tx.clone();
-        let stdout_reader = thread::spawn(move || read_stream(stdout, tx));
-        let stderr_reader = thread::spawn(move || read_stream(stderr, stderr_tx));
-        let reader = thread::spawn(move || {
-            let _ = stdout_reader.join();
-            let _ = stderr_reader.join();
-        });
+        let reader = thread::spawn(move || read_stream(reader, tx));
 
         Ok(Self {
             child,
-            stdin,
+            master: pair.master,
+            writer,
             chunks: rx,
             reader: Some(reader),
         })
     }
 
-    pub fn write_command(&mut self, command: &str) -> Result<()> {
-        self.stdin
-            .write_all(command.as_bytes())
-            .context("failed to write tmux command")?;
-        self.stdin.flush().context("failed to flush tmux command")
+    pub fn write(&mut self, bytes: &[u8]) -> Result<()> {
+        self.writer
+            .write_all(bytes)
+            .context("failed to write ssh pty")?;
+        self.writer.flush().context("failed to flush ssh pty")
+    }
+
+    pub fn resize(&mut self, cols: u16, rows: u16) -> Result<()> {
+        self.master
+            .resize(pty_size(cols, rows))
+            .context("failed to resize ssh pty")
     }
 
     pub fn drain_chunks(&mut self) -> Vec<Vec<u8>> {
@@ -57,19 +75,30 @@ impl Transport {
     }
 
     pub fn try_wait(&mut self) -> Result<Option<ExitStatus>> {
-        self.child.try_wait().context("failed to poll ssh child")
-    }
-
-    pub fn kill(&mut self) {
-        let _ = self.child.kill();
-    }
-
-    pub fn wait(mut self) -> Result<ExitStatus> {
-        let status = self.child.wait().context("failed waiting for ssh child")?;
-        if let Some(reader) = self.reader.take() {
-            let _ = reader.join();
+        let status = self.child.try_wait().context("failed to poll ssh child")?;
+        if status.is_some() {
+            if let Some(reader) = self.reader.take() {
+                let _ = reader.join();
+            }
         }
         Ok(status)
+    }
+}
+
+pub fn std_exit_code(status: ProcessExitStatus) -> i32 {
+    status.code().unwrap_or(255)
+}
+
+pub fn pty_exit_code(status: ExitStatus) -> i32 {
+    status.exit_code().min(255) as i32
+}
+
+fn pty_size(cols: u16, rows: u16) -> PtySize {
+    PtySize {
+        rows: rows.max(1),
+        cols: cols.max(1),
+        pixel_width: 0,
+        pixel_height: 0,
     }
 }
 

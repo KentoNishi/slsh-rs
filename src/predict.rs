@@ -1,5 +1,5 @@
+use crate::key::KeyIntent;
 use crate::screen::{Cell, Cursor, Screen};
-use crate::tmux::KeyIntent;
 use unicode_width::UnicodeWidthChar;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

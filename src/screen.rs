@@ -139,26 +139,6 @@ impl Screen {
         &self.buffer().cells
     }
 
-    pub fn clear_cursor_row(&mut self) {
-        let row = self.cursor.row;
-        let size = self.size;
-        self.buffer_mut().clear_row(size, row);
-        self.cursor.col = 0;
-        self.wrap_next = false;
-    }
-
-    pub fn clear_from_row(&mut self, row: u16) {
-        let size = self.size;
-        for row in row.min(size.rows)..size.rows {
-            self.buffer_mut().clear_row(size, row);
-        }
-        self.wrap_next = false;
-    }
-
-    pub fn set_cursor(&mut self, cursor: Cursor) {
-        self.move_cursor(cursor.row, cursor.col);
-    }
-
     fn buffer(&self) -> &Buffer {
         match self.active {
             ActiveBuffer::Primary => &self.primary,

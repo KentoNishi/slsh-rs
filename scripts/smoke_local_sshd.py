@@ -20,7 +20,7 @@ SSH_USER = getpass.getuser()
 
 
 def main() -> int:
-    for command in ["cargo", "ssh", "sshd", "ssh-keygen", "tmux"]:
+    for command in ["cargo", "ssh", "sshd", "ssh-keygen"]:
         require(command)
 
     subprocess.run(["cargo", "build"], cwd=ROOT, check=True)
@@ -68,7 +68,7 @@ def main() -> int:
             "echo command output": b"hello" in output,
             "red sgr output": b"\x1b[31mred" in output,
             "256-color sgr output": b"\x1b[38;5;196mhot" in output,
-            "dec special graphics output": "┌─┐".encode() in output,
+            "dec special graphics output": dec_graphics_seen(output),
         }
 
     failed = [name for name, ok in checks.items() if not ok]
@@ -222,7 +222,7 @@ def run_slsh(port: int, client_key: str, known_hosts: str) -> bytes:
                 stage == "wait_features"
                 and b"\x1b[31mred" in output
                 and b"\x1b[38;5;196mhot" in output
-                and "┌─┐".encode() in output
+                and dec_graphics_seen(output)
             ):
                 os.write(fd, b"exit\r")
                 return output
@@ -237,6 +237,14 @@ def run_slsh(port: int, client_key: str, known_hosts: str) -> bytes:
 
 def prompt_seen(output: bytes) -> bool:
     return b"bash" in output or b"#" in output or b"$" in output
+
+
+def dec_graphics_seen(output: bytes) -> bool:
+    return (
+        "┌─┐".encode() in output
+        or b"\x1b(0lqk\x1b(B" in output
+        or b"\x1b)0\x0elqk\x0f" in output
+    )
 
 
 if __name__ == "__main__":

@@ -17,7 +17,6 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 
 def main() -> int:
-    require("tmux")
     require("cargo")
 
     subprocess.run(["cargo", "build"], cwd=ROOT, check=True)
@@ -36,28 +35,26 @@ def main() -> int:
         output = run_slsh(env)
         if os.path.exists(fake_ssh_log):
             with open(fake_ssh_log, "rb") as handle:
-                control_input = handle.read()
+                ssh_input = handle.read()
         else:
-            control_input = b""
+            ssh_input = b""
 
     startup_screen = reduce_terminal(startup_output)
     output_screen = reduce_terminal(output)
     checks = {
         "startup stderr warning visible": "Warning fake ssh stderr" in startup_screen,
         "startup login preamble visible": "Welcome fake ssh login" in startup_screen,
-        "startup bootstrap command absent": "exec tmux -CC" not in startup_screen,
         "startup prompt not doubled": prompt_line_count(startup_screen) == 1,
         "echo command output": b"hello" in output,
         "red sgr output": b"\x1b[31mred" in output,
         "256-color sgr output": b"\x1b[38;5;196mhot" in output,
-        "dec special graphics output": "┌─┐".encode() in output,
-        "enter key forwarded": b"send-keys" in control_input and b"-H 0d" in control_input,
-        "backspace key forwarded": b"send-keys" in control_input and b"BSpace" in control_input,
-        "ctrl-c forwarded": b"send-keys" in control_input and b"C-c" in control_input,
-        "left key forwarded": b"send-keys" in control_input and b"Left" in control_input,
+        "dec special graphics output": "┌─┐" in output_screen,
+        "enter key forwarded": b"\r" in ssh_input,
+        "backspace key forwarded": b"\x7f" in ssh_input,
+        "ctrl-c forwarded": b"\x03" in ssh_input,
+        "left key forwarded": b"\x1b[D" in ssh_input,
         "login preamble rendered": "Welcome fake ssh login" in output_screen,
-        "bootstrap command hidden": b"exec tmux -CC" not in output,
-        "tmux prompt/output rendered": b"bash" in output or b"#" in output or b"$" in output,
+        "prompt/output rendered": b"bash" in output or b"#" in output or b"$" in output,
     }
 
     failed = [name for name, ok in checks.items() if not ok]
@@ -65,8 +62,8 @@ def main() -> int:
         sys.stderr.write("local PTY smoke failed:\n")
         for name in failed:
             sys.stderr.write(f"  missing {name}\n")
-        sys.stderr.write("\nCommands sent to tmux:\n")
-        sys.stderr.buffer.write(control_input)
+        sys.stderr.write("\nBytes sent to ssh:\n")
+        sys.stderr.buffer.write(ssh_input)
         sys.stderr.write("\nCaptured bytes:\n")
         sys.stderr.buffer.write(output)
         sys.stderr.write("\nStartup screen:\n")
@@ -90,13 +87,12 @@ import pty
 import select
 import sys
 import time
+import tty
 
-remote_command = sys.argv[-1] if "tmux -CC" in sys.argv[-1] else None
 log_path = os.environ.get("FAKE_SSH_LOG")
+tty.setraw(sys.stdin.fileno())
 pid, fd = pty.fork()
 if pid == 0:
-    if remote_command:
-        os.execlp("bash", "bash", "-lc", remote_command)
     os.write(2, b"Warning fake ssh stderr\r\n")
     if os.environ.get("FAKE_SSH_SLOW_LOGIN"):
         time.sleep(1.0)
@@ -170,7 +166,7 @@ def run_slsh(env: dict[str, str]) -> bytes:
                 stage == "wait_features"
                 and b"\x1b[31mred" in output
                 and b"\x1b[38;5;196mhot" in output
-                and "┌─┐".encode() in output
+                and "┌─┐" in reduce_terminal(output)
             ):
                 os.write(fd, b"exit\r")
                 return output
@@ -222,17 +218,31 @@ def reduce_terminal(output: bytes, rows: int = 24, cols: int = 80) -> str:
     screen = [[" "] * cols for _ in range(rows)]
     row = 0
     col = 0
+    g0_dec = False
+    g1_dec = False
+    using_g1 = False
     i = 0
     while i < len(text):
         ch = text[i]
         if ch == "\x1b":
+            if i + 2 < len(text) and text[i + 1] in "()" and text[i + 2] in "0B":
+                if text[i + 1] == "(":
+                    g0_dec = text[i + 2] == "0"
+                else:
+                    g1_dec = text[i + 2] == "0"
+                i += 3
+                continue
             end = parse_escape(text, i, screen, rows, cols)
             if end is not None:
                 row, col, i = end(row, col)
                 continue
             i += 1
             continue
-        if ch == "\r":
+        if ch == "\x0e":
+            using_g1 = True
+        elif ch == "\x0f":
+            using_g1 = False
+        elif ch == "\r":
             col = 0
         elif ch == "\n":
             row += 1
@@ -241,6 +251,8 @@ def reduce_terminal(output: bytes, rows: int = 24, cols: int = 80) -> str:
                 screen.append([" "] * cols)
                 row = rows - 1
         elif ch >= " ":
+            if g1_dec if using_g1 else g0_dec:
+                ch = map_dec_special_graphics(ch)
             if 0 <= row < rows and 0 <= col < cols:
                 screen[row][col] = ch
             col += 1
@@ -248,6 +260,22 @@ def reduce_terminal(output: bytes, rows: int = 24, cols: int = 80) -> str:
                 col = cols - 1
         i += 1
     return "\n".join("".join(line).rstrip() for line in screen)
+
+
+def map_dec_special_graphics(ch: str) -> str:
+    return {
+        "j": "┘",
+        "k": "┐",
+        "l": "┌",
+        "m": "└",
+        "n": "┼",
+        "q": "─",
+        "t": "├",
+        "u": "┤",
+        "v": "┴",
+        "w": "┬",
+        "x": "│",
+    }.get(ch, ch)
 
 
 def parse_escape(text: str, index: int, screen: list[list[str]], rows: int, cols: int):

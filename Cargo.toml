@@ -7,7 +7,6 @@ license = "MIT"
 [dependencies]
 anyhow = "1"
 crossterm = "0.29"
-shell-words = "1"
+portable-pty = "0.8"
 unicode-width = "0.2"
 vte = "0.15"
-

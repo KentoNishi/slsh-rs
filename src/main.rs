@@ -1,30 +1,29 @@
 mod input;
+mod key;
 mod predict;
 mod render;
 mod screen;
 mod ssh_args;
-mod tmux;
 mod transport;
 
 use anyhow::{Context, Result};
 use crossterm::cursor::Show;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
-use crossterm::style::{Print, ResetColor};
+use crossterm::style::ResetColor;
 use crossterm::terminal;
 use input::InputEvent;
 use predict::BasePredictor;
 use render::Renderer;
-use screen::{Cursor, Screen, Size};
+use screen::{Screen, Size};
 use ssh_args::{LaunchMode, ParsedSshArgs};
 use std::collections::HashSet;
 use std::env;
 use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::{self, IsTerminal, Write};
-use std::process::{Command, ExitStatus, Stdio};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tmux::{ControlEvent, StreamEvent};
+use std::process::{Command, Stdio};
+use std::time::Duration;
 use transport::Transport;
 
 fn main() {
@@ -56,25 +55,11 @@ fn run_passthrough(args: &[String]) -> Result<i32> {
         .stderr(Stdio::inherit())
         .status()
         .context("failed to run ssh")?;
-    Ok(exit_code(status))
+    Ok(transport::std_exit_code(status))
 }
 
 fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
-    let host = parsed.host.as_ref().context("missing ssh host")?;
-    let session_name = make_session_name();
-    let login_bootstrap = parsed.remote_command.is_empty();
-    let launcher = if login_bootstrap {
-        tmux::shell_launcher(&session_name)
-    } else {
-        tmux::command_launcher(&session_name, &parsed.remote_command)
-    };
-
-    let mut ssh_args = parsed.ssh_options.clone();
-    ssh_args.push("-tt".into());
-    ssh_args.push(host.clone());
-    if !login_bootstrap {
-        ssh_args.push(launcher.clone());
-    }
+    let ssh_args = compositor_ssh_args(&parsed);
 
     let (cols, rows) = terminal::size().context("failed to read terminal size")?;
     let mut screen = Screen::new(Size {
@@ -82,131 +67,79 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
         rows: rows.max(1),
     });
     let mut parser = vte::Parser::new();
-    let mut stream = tmux::StreamParser::new();
     let mut predictor = BasePredictor::new(parsed.slsh.predict);
     let mut renderer = Renderer::new();
-    let mut transport = Transport::spawn(&ssh_args)?;
+    let mut transport = Transport::spawn(&ssh_args, cols.max(1), rows.max(1))?;
     let _terminal = TerminalGuard::enter()?;
-    let mut active_pane: Option<String> = Some(session_name);
-    let mut bootstrap = LoginBootstrap::new(login_bootstrap.then_some(launcher));
     let mut stdout = io::stdout();
-    let mut done = false;
-    let mut input_ready = false;
     let mut key_trace = KeyTrace::from_env();
     let mut pressed_keys = HashSet::new();
+    let mut raw_synced = true;
 
-    while !done {
+    loop {
         let mut dirty = false;
 
         for chunk in transport.drain_chunks() {
-            for event in stream.push(&chunk) {
-                match event {
-                    StreamEvent::Raw(bytes) => {
-                        if bootstrap.accept_raw() {
-                            screen.feed(&mut parser, &bytes);
-                            predictor.reconcile(&screen);
-                            bootstrap.note_raw();
-                            if bootstrap.preserve_raw_terminal() {
-                                let bytes = bootstrap.completed_raw_terminal_bytes(&bytes);
-                                stdout
-                                    .write_all(&bytes)
-                                    .context("failed to render login output")?;
-                                stdout.flush().context("failed to flush login output")?;
-                                renderer.sync_to_terminal(&screen, &predictor.overlay);
-                            } else {
-                                dirty = true;
-                            }
-                        }
-                    }
-                    StreamEvent::Control(ControlEvent::Output { pane, bytes }) => {
-                        bootstrap.note_control();
-                        active_pane = Some(pane);
-                        input_ready = true;
-                        let bytes = bootstrap.prepare_first_output(&mut screen, &bytes);
-                        screen.feed(&mut parser, &bytes);
-                        predictor.reconcile(&screen);
-                        dirty = true;
-                    }
-                    StreamEvent::Control(ControlEvent::Exit) => {
-                        bootstrap.note_control();
-                        done = true;
-                    }
-                    StreamEvent::Control(ControlEvent::Error(error)) => {
-                        bootstrap.note_control();
-                        transport.kill();
-                        anyhow::bail!("tmux error: {error}");
-                    }
-                    StreamEvent::Control(ControlEvent::Notification(_)) => {
-                        bootstrap.note_control();
-                    }
-                }
-            }
-        }
-
-        if bootstrap.ready(&screen) {
-            let anchor = (screen.cursor().col > 0).then(|| screen.cursor());
-            if anchor.is_some() {
-                screen.clear_cursor_row();
-                predictor.clear();
+            screen.feed(&mut parser, &chunk);
+            predictor.reconcile(&screen);
+            if raw_synced && predictor.overlay.cells.is_empty() {
+                stdout
+                    .write_all(&chunk)
+                    .context("failed to render ssh output")?;
+                stdout.flush().context("failed to flush ssh output")?;
+                renderer.sync_to_terminal(&screen, &predictor.overlay);
+            } else {
                 dirty = true;
             }
-            if let Some(command) = bootstrap.command(anchor) {
-                transport.write_command(&command)?;
-            }
         }
 
-        if input_ready {
-            while input::poll(Duration::from_millis(1)).context("failed to poll terminal input")? {
-                match input::read().context("failed to read terminal input")? {
-                    Some(InputEvent::Key(key)) => {
-                        let mapped = tmux::key_to_tmux(key, active_pane.as_deref());
-                        let should_forward = match key.kind {
-                            KeyEventKind::Press | KeyEventKind::Repeat => {
-                                pressed_keys.insert(key_fingerprint(key));
-                                true
-                            }
-                            KeyEventKind::Release => !pressed_keys.remove(&key_fingerprint(key)),
-                        };
-                        key_trace.log(format_args!(
-                            "key {:?} pane {:?} forwarded {should_forward} command {:?} intent {:?}",
-                            key,
-                            active_pane,
-                            mapped.command.as_deref(),
-                            mapped.intent
-                        ));
-                        if should_forward {
-                            if let Some(command) = mapped.command {
-                                transport.write_command(&command)?;
-                            }
-                            predictor.on_key(mapped.intent, &screen);
-                            dirty = true;
+        while input::poll(Duration::from_millis(1)).context("failed to poll terminal input")? {
+            match input::read().context("failed to read terminal input")? {
+                Some(InputEvent::Key(key)) => {
+                    let encoded = key::encode_key(key);
+                    let should_forward = match key.kind {
+                        KeyEventKind::Press | KeyEventKind::Repeat => {
+                            pressed_keys.insert(key_fingerprint(key));
+                            true
                         }
-                    }
-                    Some(InputEvent::Resize(cols, rows)) => {
-                        screen.resize(Size {
-                            cols: cols.max(1),
-                            rows: rows.max(1),
-                        });
-                        renderer.invalidate();
-                        predictor.clear();
-                        transport.write_command(&tmux::resize_command(cols.max(1), rows.max(1)))?;
+                        KeyEventKind::Release => {
+                            pressed_keys.remove(&key_fingerprint(key));
+                            false
+                        }
+                    };
+                    key_trace.log(format_args!(
+                        "key {:?} forwarded {should_forward} bytes {:?} intent {:?}",
+                        key, encoded.bytes, encoded.intent
+                    ));
+                    if should_forward {
+                        if !encoded.bytes.is_empty() {
+                            transport.write(&encoded.bytes)?;
+                        }
+                        predictor.on_key(encoded.intent, &screen);
                         dirty = true;
                     }
-                    #[cfg(not(windows))]
-                    Some(InputEvent::Paste(text)) => {
-                        let command = tmux::paste_to_tmux(&text, active_pane.as_deref());
-                        key_trace.log(format_args!(
-                            "paste {:?} pane {:?} command {:?}",
-                            text, active_pane, command
-                        ));
-                        if !command.is_empty() {
-                            transport.write_command(&command)?;
-                        }
-                        predictor.clear();
-                        dirty = true;
-                    }
-                    None => {}
                 }
+                Some(InputEvent::Resize(cols, rows)) => {
+                    let cols = cols.max(1);
+                    let rows = rows.max(1);
+                    screen.resize(Size { cols, rows });
+                    transport.resize(cols, rows)?;
+                    renderer.invalidate();
+                    predictor.clear();
+                    dirty = true;
+                    raw_synced = false;
+                }
+                #[cfg(not(windows))]
+                Some(InputEvent::Paste(text)) => {
+                    let bytes = key::encode_paste(&text);
+                    key_trace.log(format_args!("paste {:?} bytes {:?}", text, bytes));
+                    if !bytes.is_empty() {
+                        transport.write(&bytes)?;
+                    }
+                    predictor.clear();
+                    dirty = true;
+                }
+                None => {}
             }
         }
 
@@ -216,155 +149,24 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
                 .write_all(output.as_bytes())
                 .context("failed to render terminal")?;
             stdout.flush().context("failed to flush terminal")?;
+            raw_synced = predictor.overlay.cells.is_empty();
         }
 
         if let Some(status) = transport.try_wait()? {
-            return Ok(exit_code(status));
+            return Ok(transport::pty_exit_code(status));
         }
 
         if !dirty {
             std::thread::sleep(Duration::from_millis(5));
         }
     }
-
-    Ok(exit_code(transport.wait()?))
 }
 
-fn make_session_name() -> String {
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
-        .unwrap_or_default();
-    format!("slsh-{}-{millis}", std::process::id())
-}
-
-struct LoginBootstrap {
-    launcher: Option<String>,
-    started_at: Instant,
-    last_raw_at: Option<Instant>,
-    sent: bool,
-    suppress_raw: bool,
-    handoff: Option<Cursor>,
-    raw_terminal_buffer: Vec<u8>,
-}
-
-impl LoginBootstrap {
-    fn new(launcher: Option<String>) -> Self {
-        Self {
-            launcher,
-            started_at: Instant::now(),
-            last_raw_at: None,
-            sent: false,
-            suppress_raw: false,
-            handoff: None,
-            raw_terminal_buffer: Vec::new(),
-        }
-    }
-
-    fn accept_raw(&self) -> bool {
-        !self.suppress_raw
-    }
-
-    fn preserve_raw_terminal(&self) -> bool {
-        self.launcher.is_some() && !self.sent
-    }
-
-    fn completed_raw_terminal_bytes(&mut self, bytes: &[u8]) -> Vec<u8> {
-        self.raw_terminal_buffer.extend_from_slice(bytes);
-        let Some(index) = self
-            .raw_terminal_buffer
-            .iter()
-            .rposition(|byte| *byte == b'\n')
-        else {
-            return Vec::new();
-        };
-        self.raw_terminal_buffer.drain(..=index).collect()
-    }
-
-    fn note_raw(&mut self) {
-        if !self.sent {
-            self.last_raw_at = Some(Instant::now());
-        }
-    }
-
-    fn note_control(&mut self) {
-        self.suppress_raw = false;
-    }
-
-    fn ready(&self, screen: &Screen) -> bool {
-        self.ready_at(screen, Instant::now())
-    }
-
-    fn ready_at(&self, screen: &Screen, now: Instant) -> bool {
-        if self.launcher.is_none() || self.sent {
-            return false;
-        }
-        if login_prompt_ready(screen) {
-            return true;
-        }
-        let elapsed = now.duration_since(self.started_at);
-        match self.last_raw_at {
-            Some(last) => {
-                screen.cursor().col > 0
-                    && elapsed >= Duration::from_secs(8)
-                    && now.duration_since(last) >= Duration::from_secs(4)
-            }
-            None => elapsed >= Duration::from_millis(1500),
-        }
-    }
-
-    fn command(&mut self, handoff: Option<Cursor>) -> Option<String> {
-        let launcher = self.launcher.as_ref()?;
-        self.sent = true;
-        self.suppress_raw = true;
-        self.handoff = handoff.map(|cursor| Cursor {
-            row: cursor.row,
-            col: 0,
-        });
-        self.raw_terminal_buffer.clear();
-        Some(format!("exec {launcher}\n"))
-    }
-
-    fn prepare_first_output(&mut self, screen: &mut Screen, bytes: &[u8]) -> Vec<u8> {
-        let Some(anchor) = self.handoff.take() else {
-            return bytes.to_vec();
-        };
-        screen.clear_from_row(anchor.row);
-        screen.set_cursor(anchor);
-        trim_handoff_newline(bytes).to_vec()
-    }
-}
-
-fn trim_handoff_newline(bytes: &[u8]) -> &[u8] {
-    bytes
-        .strip_prefix(b"\r\n")
-        .or_else(|| bytes.strip_prefix(b"\n"))
-        .or_else(|| bytes.strip_prefix(b"\r"))
-        .unwrap_or(bytes)
-}
-
-fn login_prompt_ready(screen: &Screen) -> bool {
-    let cursor = screen.cursor();
-    if cursor.col == 0 {
-        return false;
-    }
-    let start = cursor.col.saturating_sub(4);
-    let mut tail = String::new();
-    for col in start..cursor.col {
-        tail.push(
-            screen
-                .cell(screen::Cursor {
-                    row: cursor.row,
-                    col,
-                })
-                .ch,
-        );
-    }
-    tail.ends_with("$ ") || tail.ends_with("# ") || tail.ends_with("> ")
-}
-
-fn exit_code(status: ExitStatus) -> i32 {
-    status.code().unwrap_or(255)
+fn compositor_ssh_args(parsed: &ParsedSshArgs) -> Vec<String> {
+    let mut args = Vec::with_capacity(parsed.forwarded_args.len() + 1);
+    args.push("-tt".into());
+    args.extend(parsed.forwarded_args.iter().cloned());
+    args
 }
 
 fn key_fingerprint(key: KeyEvent) -> String {
@@ -389,7 +191,6 @@ impl TerminalGuard {
         let _ = crossterm::ansi_support::supports_ansi();
 
         terminal::enable_raw_mode().context("failed to enable raw mode")?;
-        execute!(io::stdout(), Print("\x1b[?7l\x1b[?25l")).context("failed to prepare terminal")?;
         Ok(Self)
     }
 }
@@ -414,7 +215,7 @@ impl KeyTrace {
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        let _ = execute!(io::stdout(), Print("\x1b[?7h"), ResetColor, Show);
+        let _ = execute!(io::stdout(), ResetColor, Show);
         let _ = terminal::disable_raw_mode();
     }
 }
@@ -423,90 +224,23 @@ impl Drop for TerminalGuard {
 mod tests {
     use super::*;
 
-    fn screen_with(bytes: &[u8]) -> Screen {
-        let mut screen = Screen::new(Size { cols: 80, rows: 6 });
-        let mut parser = vte::Parser::new();
-        screen.feed(&mut parser, bytes);
-        screen
-    }
-
-    fn prompt_lines(screen: &Screen) -> usize {
-        screen
-            .visible_text_tail(screen.size().rows)
-            .lines()
-            .filter(|line| line.trim_end().ends_with(['#', '$', '>']))
-            .count()
-    }
-
     #[test]
-    fn bootstrap_does_not_cut_off_slow_login_banner() {
-        let start = Instant::now();
-        let screen = screen_with(b"Warning fake ssh stderr");
-        let bootstrap = LoginBootstrap {
-            launcher: Some("tmux -CC new-session -s test".into()),
-            started_at: start,
-            last_raw_at: Some(start + Duration::from_millis(10)),
-            sent: false,
-            suppress_raw: false,
-            handoff: None,
-            raw_terminal_buffer: Vec::new(),
-        };
-
-        assert!(!bootstrap.ready_at(&screen, start + Duration::from_secs(1)));
-        assert!(!bootstrap.ready_at(&screen, start + Duration::from_secs(7)));
-        assert!(bootstrap.ready_at(&screen, start + Duration::from_secs(9)));
-    }
-
-    #[test]
-    fn bootstrap_starts_immediately_on_prompt() {
-        let start = Instant::now();
-        let screen = screen_with(b"Welcome\r\n(base) root@host:~# ");
-        let bootstrap = LoginBootstrap {
-            launcher: Some("tmux -CC new-session -s test".into()),
-            started_at: start,
-            last_raw_at: Some(start),
-            sent: false,
-            suppress_raw: false,
-            handoff: None,
-            raw_terminal_buffer: Vec::new(),
-        };
-
-        assert!(bootstrap.ready_at(&screen, start + Duration::from_millis(50)));
-    }
-
-    #[test]
-    fn first_tmux_output_replaces_bootstrap_prompt_row() {
-        let mut screen = screen_with(b"Welcome\r\n(base) root@host:~# ");
-        let anchor = screen.cursor();
-        let mut parser = vte::Parser::new();
-        let mut bootstrap = LoginBootstrap::new(Some("tmux -CC new-session -s test".into()));
-
-        screen.clear_cursor_row();
-        bootstrap.command(Some(anchor));
-        let bytes = bootstrap.prepare_first_output(&mut screen, b"\r\n(base) root@host:~# ");
-        screen.feed(&mut parser, &bytes);
-
-        let text = screen.visible_text_tail(screen.size().rows);
-        assert!(text.contains("Welcome"));
-        assert_eq!(prompt_lines(&screen), 1, "{text}");
-    }
-
-    #[test]
-    fn handoff_trims_one_leading_newline() {
-        assert_eq!(trim_handoff_newline(b"\r\nprompt"), b"prompt");
-        assert_eq!(trim_handoff_newline(b"\nprompt"), b"prompt");
-        assert_eq!(trim_handoff_newline(b"\rprompt"), b"prompt");
-        assert_eq!(trim_handoff_newline(b"prompt"), b"prompt");
-    }
-
-    #[test]
-    fn bootstrap_preserves_complete_login_lines_but_holds_prompt() {
-        let mut bootstrap = LoginBootstrap::new(Some("tmux -CC new-session -s test".into()));
+    fn compositor_uses_forwarded_args_with_forced_tty() {
+        let parsed = ssh_args::parse(
+            vec![
+                "-p".into(),
+                "2222".into(),
+                "host".into(),
+                "bash".into(),
+                "-l".into(),
+            ],
+            true,
+            true,
+        );
 
         assert_eq!(
-            bootstrap.completed_raw_terminal_bytes(b"Welcome\r\nbash-5.0# "),
-            b"Welcome\r\n"
+            compositor_ssh_args(&parsed),
+            vec!["-tt", "-p", "2222", "host", "bash", "-l"]
         );
-        assert_eq!(bootstrap.completed_raw_terminal_bytes(b""), b"");
     }
 }
