@@ -7,7 +7,7 @@ mod transport;
 
 use anyhow::{Context, Result};
 use crossterm::cursor::Show;
-use crossterm::event::{self, Event, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::style::{Print, ResetColor};
 use crossterm::terminal;
@@ -15,6 +15,7 @@ use predict::BasePredictor;
 use render::Renderer;
 use screen::{Screen, Size};
 use ssh_args::{LaunchMode, ParsedSshArgs};
+use std::collections::HashSet;
 use std::env;
 use std::fmt;
 use std::fs::{File, OpenOptions};
@@ -85,6 +86,7 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
     let mut stdout = io::stdout();
     let mut done = false;
     let mut key_trace = KeyTrace::from_env();
+    let mut pressed_keys = HashSet::new();
 
     while !done {
         let mut dirty = false;
@@ -118,7 +120,14 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
                         mapped.command.as_deref(),
                         mapped.intent
                     ));
-                    if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                    let should_forward = match key.kind {
+                        KeyEventKind::Press | KeyEventKind::Repeat => {
+                            pressed_keys.insert(key_fingerprint(key));
+                            true
+                        }
+                        KeyEventKind::Release => !pressed_keys.remove(&key_fingerprint(key)),
+                    };
+                    if should_forward {
                         if let Some(command) = mapped.command {
                             transport.write_command(&command)?;
                         }
@@ -195,6 +204,20 @@ fn make_session_name() -> String {
 
 fn exit_code(status: ExitStatus) -> i32 {
     status.code().unwrap_or(255)
+}
+
+fn key_fingerprint(key: KeyEvent) -> String {
+    let mut modifiers = key.modifiers;
+    let code = match key.code {
+        KeyCode::Char('\r' | '\n') | KeyCode::Enter => "Enter".to_string(),
+        KeyCode::Char('\u{8}' | '\u{7f}') | KeyCode::Backspace => "Backspace".to_string(),
+        KeyCode::Char(ch) => {
+            modifiers.remove(KeyModifiers::SHIFT);
+            format!("Char({ch})")
+        }
+        other => format!("{other:?}"),
+    };
+    format!("{modifiers:?}:{code}")
 }
 
 struct TerminalGuard;
