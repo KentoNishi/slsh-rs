@@ -27,7 +27,8 @@ def main() -> int:
     scrolled_overlay_output = run_scrolled_overlay()
     app_prefix_output = run_app_prefix_guard()
     app_cursor_output = run_app_cursor_overlay()
-    mouse_output = run_mouse_forwarding()
+    mouse_sgr_output = run_mouse_forwarding(True)
+    mouse_x10_output = run_mouse_forwarding(False)
 
     failed = []
     if marker not in output:
@@ -50,8 +51,10 @@ def main() -> int:
         failed.append("nonlinear prefix suppresses next printable overlay")
     if b"Z" not in app_cursor_output or b"\x1b[2;1H" not in app_cursor_output:
         failed.append("app cursor overlay row")
-    if b"SLSHMOUSEOK" not in mouse_output:
-        failed.append("mouse forwarding")
+    if b"SLSHMOUSEOK" not in mouse_sgr_output:
+        failed.append("SGR mouse forwarding")
+    if b"SLSHMOUSEOK" not in mouse_x10_output:
+        failed.append("X10 mouse forwarding")
 
     if failed:
         sys.stderr.write("loopback smoke failed: marker missing\n")
@@ -73,8 +76,10 @@ def main() -> int:
         sys.stderr.buffer.write(app_prefix_output)
         sys.stderr.write("\nApp cursor bytes:\n")
         sys.stderr.buffer.write(app_cursor_output)
-        sys.stderr.write("\nMouse bytes:\n")
-        sys.stderr.buffer.write(mouse_output)
+        sys.stderr.write("\nSGR mouse bytes:\n")
+        sys.stderr.buffer.write(mouse_sgr_output)
+        sys.stderr.write("\nX10 mouse bytes:\n")
+        sys.stderr.buffer.write(mouse_x10_output)
         sys.stderr.write("\n")
         return 1
 
@@ -470,7 +475,7 @@ def run_app_cursor_overlay() -> bytes:
     return output[probe_start:]
 
 
-def run_mouse_forwarding() -> bytes:
+def run_mouse_forwarding(sgr: bool) -> bytes:
     argv = [os.path.join(ROOT, "target", "debug", "slsh"), "ignored-host"]
     env = os.environ.copy()
     env["SLSH_LOOPBACK"] = "1"
@@ -484,14 +489,19 @@ def run_mouse_forwarding() -> bytes:
     os.set_blocking(fd, False)
     fcntl_rows_cols(fd, 24, 80)
 
+    enable_mouse = "\\033[?1000h\\033[?1006h" if sgr else "\\033[?1000h"
+    disable_mouse = "\\033[?1006l\\033[?1000l" if sgr else "\\033[?1000l"
+    expected = "\\033[<0;10;5M" if sgr else "\\033[M *%"
+    injected = b"\x1b[<0;10;5M" if sgr else b"\x1b[M *%"
+
     app = (
         "python3 -c 'import os,sys,tty;"
         "tty.setraw(0);"
-        "sys.stdout.write(\"\\033[?1049h\\033[?1000h\\033[?1006hMOUSE_READY\\r\\n\");"
+        f"sys.stdout.write(\"\\033[?1049h{enable_mouse}MOUSE_READY\\r\\n\");"
         "sys.stdout.flush();"
         "data=os.read(0,32);"
-        "ok=data.startswith(b\"\\033[<0;10;5M\");"
-        "sys.stdout.write(\"\\033[?1006l\\033[?1000l\\033[?1049l\" + (\"SLSHMOUSEOK\\n\" if ok else (\"SLSHMOUSEBAD %r\\n\" % (data,))));"
+        f"ok=data.startswith(b\"{expected}\");"
+        f"sys.stdout.write(\"{disable_mouse}\\033[?1049l\" + (\"SLSHMOUSEOK\\n\" if ok else (\"SLSHMOUSEBAD %r\\n\" % (data,))));"
         "sys.stdout.flush()'\r"
     ).encode()
 
@@ -514,7 +524,7 @@ def run_mouse_forwarding() -> bytes:
                 os.write(fd, b"\x1b[200~" + app + b"\x1b[201~")
                 sent_app = True
             if sent_app and not sent_mouse and b"MOUSE_READY" in output:
-                os.write(fd, b"\x1b[<0;10;5M")
+                os.write(fd, injected)
                 sent_mouse = True
             if b"SLSHMOUSEOK" in output or b"SLSHMOUSEBAD" in output:
                 return output

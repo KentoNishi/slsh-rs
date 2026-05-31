@@ -1,6 +1,8 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 #[cfg(any(not(windows), test))]
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+#[cfg(any(not(windows), test))]
+use std::convert::TryFrom;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyIntent {
@@ -16,6 +18,48 @@ pub enum KeyIntent {
 pub struct EncodedKey {
     pub bytes: Vec<u8>,
     pub intent: KeyIntent,
+}
+
+#[cfg(any(not(windows), test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MouseProtocol {
+    #[default]
+    X10,
+    Sgr,
+}
+
+#[cfg(any(not(windows), test))]
+impl MouseProtocol {
+    pub fn feed(&mut self, bytes: &[u8]) {
+        let mut index = 0;
+        while let Some(start) = find_bytes(&bytes[index..], b"\x1b[?") {
+            index += start + 3;
+            let params_start = index;
+            while index < bytes.len() && (bytes[index].is_ascii_digit() || bytes[index] == b';') {
+                index += 1;
+            }
+            if index >= bytes.len() {
+                break;
+            }
+            match bytes[index] {
+                b'h' => self.set_modes(&bytes[params_start..index]),
+                b'l' => self.reset_modes(&bytes[params_start..index]),
+                _ => {}
+            }
+        }
+    }
+
+    fn set_modes(&mut self, params: &[u8]) {
+        if private_mode_params_contain(params, &[1006]) {
+            *self = Self::Sgr;
+        }
+    }
+
+    fn reset_modes(&mut self, params: &[u8]) {
+        if private_mode_params_contain(params, &[1005, 1006, 1015]) {
+            *self = Self::X10;
+        }
+    }
 }
 
 pub fn encode_key_with_mode(event: KeyEvent, application_cursor_keys: bool) -> EncodedKey {
@@ -92,7 +136,7 @@ pub fn encode_key_with_mode(event: KeyEvent, application_cursor_keys: bool) -> E
 }
 
 #[cfg(any(not(windows), test))]
-pub fn encode_mouse(event: MouseEvent) -> Vec<u8> {
+pub fn encode_mouse(event: MouseEvent, protocol: MouseProtocol) -> Vec<u8> {
     let (mut code, suffix) = mouse_code(event.kind);
     if event.modifiers.contains(KeyModifiers::SHIFT) {
         code += 4;
@@ -104,14 +148,10 @@ pub fn encode_mouse(event: MouseEvent) -> Vec<u8> {
         code += 16;
     }
 
-    format!(
-        "\x1b[<{};{};{}{}",
-        code,
-        event.column.saturating_add(1),
-        event.row.saturating_add(1),
-        suffix
-    )
-    .into_bytes()
+    match protocol {
+        MouseProtocol::Sgr => encode_sgr_mouse(event, code, suffix),
+        MouseProtocol::X10 => encode_x10_mouse(event, code),
+    }
 }
 
 #[cfg(any(not(windows), test))]
@@ -162,6 +202,55 @@ fn mouse_button(button: MouseButton) -> u16 {
         MouseButton::Middle => 1,
         MouseButton::Right => 2,
     }
+}
+
+#[cfg(any(not(windows), test))]
+fn encode_sgr_mouse(event: MouseEvent, code: u16, suffix: char) -> Vec<u8> {
+    format!(
+        "\x1b[<{};{};{}{}",
+        code,
+        event.column.saturating_add(1),
+        event.row.saturating_add(1),
+        suffix
+    )
+    .into_bytes()
+}
+
+#[cfg(any(not(windows), test))]
+fn encode_x10_mouse(event: MouseEvent, mut code: u16) -> Vec<u8> {
+    if matches!(event.kind, MouseEventKind::Up(_)) {
+        code = (code & !0b11) + 3;
+    }
+    let Some(button) = x10_coord_byte(code) else {
+        return Vec::new();
+    };
+    let Some(column) = x10_coord_byte(event.column.saturating_add(1)) else {
+        return Vec::new();
+    };
+    let Some(row) = x10_coord_byte(event.row.saturating_add(1)) else {
+        return Vec::new();
+    };
+    vec![0x1b, b'[', b'M', button, column, row]
+}
+
+#[cfg(any(not(windows), test))]
+fn x10_coord_byte(value: u16) -> Option<u8> {
+    u8::try_from(value.checked_add(32)?).ok()
+}
+
+#[cfg(any(not(windows), test))]
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+#[cfg(any(not(windows), test))]
+fn private_mode_params_contain(params: &[u8], modes: &[u16]) -> bool {
+    params
+        .split(|byte| *byte == b';')
+        .filter_map(|param| std::str::from_utf8(param).ok()?.parse::<u16>().ok())
+        .any(|mode| modes.contains(&mode))
 }
 
 fn bytes(bytes: Vec<u8>, intent: KeyIntent) -> EncodedKey {
@@ -436,40 +525,98 @@ mod tests {
     #[test]
     fn encodes_sgr_mouse_events() {
         assert_eq!(
-            encode_mouse(MouseEvent {
-                kind: MouseEventKind::Down(MouseButton::Left),
-                column: 9,
-                row: 4,
-                modifiers: KeyModifiers::NONE,
-            }),
+            encode_mouse(
+                MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: 9,
+                    row: 4,
+                    modifiers: KeyModifiers::NONE,
+                },
+                MouseProtocol::Sgr
+            ),
             b"\x1b[<0;10;5M"
         );
         assert_eq!(
-            encode_mouse(MouseEvent {
-                kind: MouseEventKind::Up(MouseButton::Left),
-                column: 9,
-                row: 4,
-                modifiers: KeyModifiers::NONE,
-            }),
+            encode_mouse(
+                MouseEvent {
+                    kind: MouseEventKind::Up(MouseButton::Left),
+                    column: 9,
+                    row: 4,
+                    modifiers: KeyModifiers::NONE,
+                },
+                MouseProtocol::Sgr
+            ),
             b"\x1b[<0;10;5m"
         );
         assert_eq!(
-            encode_mouse(MouseEvent {
-                kind: MouseEventKind::ScrollDown,
-                column: 0,
-                row: 0,
-                modifiers: KeyModifiers::CONTROL,
-            }),
+            encode_mouse(
+                MouseEvent {
+                    kind: MouseEventKind::ScrollDown,
+                    column: 0,
+                    row: 0,
+                    modifiers: KeyModifiers::CONTROL,
+                },
+                MouseProtocol::Sgr
+            ),
             b"\x1b[<81;1;1M"
         );
         assert_eq!(
-            encode_mouse(MouseEvent {
-                kind: MouseEventKind::Drag(MouseButton::Right),
-                column: 2,
-                row: 3,
-                modifiers: KeyModifiers::SHIFT | KeyModifiers::ALT,
-            }),
+            encode_mouse(
+                MouseEvent {
+                    kind: MouseEventKind::Drag(MouseButton::Right),
+                    column: 2,
+                    row: 3,
+                    modifiers: KeyModifiers::SHIFT | KeyModifiers::ALT,
+                },
+                MouseProtocol::Sgr
+            ),
             b"\x1b[<46;3;4M"
         );
+    }
+
+    #[test]
+    fn encodes_x10_mouse_events() {
+        assert_eq!(
+            encode_mouse(
+                MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: 9,
+                    row: 4,
+                    modifiers: KeyModifiers::NONE,
+                },
+                MouseProtocol::X10
+            ),
+            b"\x1b[M *%"
+        );
+        assert_eq!(
+            encode_mouse(
+                MouseEvent {
+                    kind: MouseEventKind::Up(MouseButton::Left),
+                    column: 9,
+                    row: 4,
+                    modifiers: KeyModifiers::CONTROL,
+                },
+                MouseProtocol::X10
+            ),
+            b"\x1b[M3*%"
+        );
+    }
+
+    #[test]
+    fn tracks_requested_mouse_protocol() {
+        let mut protocol = MouseProtocol::default();
+        assert_eq!(protocol, MouseProtocol::X10);
+
+        protocol.feed(b"\x1b[?1000h");
+        assert_eq!(protocol, MouseProtocol::X10);
+
+        protocol.feed(b"\x1b[?1000;1006h");
+        assert_eq!(protocol, MouseProtocol::Sgr);
+
+        protocol.feed(b"\x1b[?1000l");
+        assert_eq!(protocol, MouseProtocol::Sgr);
+
+        protocol.feed(b"\x1b[?1006l");
+        assert_eq!(protocol, MouseProtocol::X10);
     }
 }
