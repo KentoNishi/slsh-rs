@@ -196,7 +196,9 @@ impl BasePredictor {
         }
 
         let Some(target) = self.backspace_target(screen) else {
-            self.clear();
+            if self.overlay.cells.is_empty() {
+                self.clear();
+            }
             return;
         };
 
@@ -220,7 +222,9 @@ impl BasePredictor {
         }
 
         if !self.remove_owned(target) {
-            self.clear();
+            if self.overlay.cells.is_empty() {
+                self.clear();
+            }
             return;
         }
 
@@ -618,6 +622,46 @@ mod tests {
             .cells
             .iter()
             .all(|cell| cell.cell.style.strikethrough));
+        assert_eq!(predictor.overlay.cursor, Some(Cursor { row: 0, col: 2 }));
+    }
+
+    #[test]
+    fn extra_backspace_at_prompt_keeps_pending_deletions() {
+        let mut screen = screen_with(b"$ ");
+        let mut predictor = BasePredictor::new(true);
+
+        for ch in ['a', 'b', 'c'] {
+            predictor.on_key(KeyIntent::Printable(ch), &screen);
+        }
+        feed(&mut screen, b"abc");
+        predictor.reconcile(&screen);
+        for _ in 0..3 {
+            predictor.on_key(KeyIntent::Backspace, &screen);
+        }
+
+        let before = predictor.overlay.clone();
+        predictor.on_key(KeyIntent::Backspace, &screen);
+
+        assert_eq!(predictor.overlay, before);
+        assert_eq!(predictor.overlay.cursor, Some(Cursor { row: 0, col: 2 }));
+    }
+
+    #[test]
+    fn extra_backspace_at_start_keeps_unconfirmed_deletions() {
+        let screen = screen_with(b"$ ");
+        let mut predictor = BasePredictor::new(true);
+
+        for ch in ['a', 'b', 'c'] {
+            predictor.on_key(KeyIntent::Printable(ch), &screen);
+        }
+        for _ in 0..3 {
+            predictor.on_key(KeyIntent::Backspace, &screen);
+        }
+
+        let before = predictor.overlay.clone();
+        predictor.on_key(KeyIntent::Backspace, &screen);
+
+        assert_eq!(predictor.overlay, before);
         assert_eq!(predictor.overlay.cursor, Some(Cursor { row: 0, col: 2 }));
     }
 
