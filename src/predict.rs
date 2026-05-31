@@ -336,7 +336,13 @@ impl BasePredictor {
         let at_overlay_cursor = self.overlay.cursor == Some(cursor);
         let at_pending_cell = self.overlay.cells.iter().any(|cell| cell.pos == cursor);
         let still_redrawing_overlay_rows = cursor_on_overlay_rows(cursor, &self.overlay.cells);
-        if !at_overlay_cursor && !at_pending_cell && !still_redrawing_overlay_rows {
+        let pending_wrap_before_overlay =
+            cursor_before_wrapped_overlay_row(cursor, &self.overlay.cells, screen);
+        if !at_overlay_cursor
+            && !at_pending_cell
+            && !still_redrawing_overlay_rows
+            && !pending_wrap_before_overlay
+        {
             self.clear();
         }
     }
@@ -468,6 +474,7 @@ fn remote_cursor_accepts_suffix(
     overlay_cursor == Some(cursor)
         || suffix.iter().any(|cell| cell.pos == cursor)
         || cursor_on_overlay_rows(cursor, suffix)
+        || cursor_before_wrapped_overlay_row(cursor, suffix, screen)
 }
 
 fn cursor_on_overlay_rows(cursor: Cursor, cells: &[OverlayCell]) -> bool {
@@ -475,6 +482,19 @@ fn cursor_on_overlay_rows(cursor: Cursor, cells: &[OverlayCell]) -> bool {
         return false;
     };
     (first.pos.row..=last.pos.row).contains(&cursor.row)
+}
+
+fn cursor_before_wrapped_overlay_row(
+    cursor: Cursor,
+    cells: &[OverlayCell],
+    screen: &Screen,
+) -> bool {
+    let Some(first) = cells.first() else {
+        return false;
+    };
+    first.pos.col == 0
+        && first.pos.row == cursor.row.saturating_add(1)
+        && cursor.col + 1 == screen.size().cols
 }
 
 fn cursor_reached(cursor: Cursor, target: Cursor, screen: &Screen) -> bool {
@@ -512,6 +532,13 @@ mod tests {
 
     fn screen_with(text: &[u8]) -> Screen {
         let mut screen = Screen::new(Size { cols: 20, rows: 3 });
+        let mut parser = vte::Parser::new();
+        screen.feed(&mut parser, text);
+        screen
+    }
+
+    fn screen_with_size(size: Size, text: &[u8]) -> Screen {
+        let mut screen = Screen::new(size);
         let mut parser = vte::Parser::new();
         screen.feed(&mut parser, text);
         screen
@@ -891,6 +918,36 @@ mod tests {
 
         assert!(predictor.overlay.cells.is_empty());
         assert_eq!(predictor.overlay.cursor, None);
+    }
+
+    #[test]
+    fn typo_correction_survives_remote_pending_wrap_at_last_kept_char() {
+        let mut screen = screen_with_size(Size { cols: 7, rows: 3 }, b"$ ");
+        let mut predictor = BasePredictor::new(true);
+
+        for ch in "abc nyow".chars() {
+            predictor.on_key(KeyIntent::Printable(ch), &screen);
+        }
+        for _ in 0..3 {
+            predictor.on_key(KeyIntent::Backspace, &screen);
+        }
+        for ch in "ow more".chars() {
+            predictor.on_key(KeyIntent::Printable(ch), &screen);
+        }
+
+        feed_each_reconcile(&mut screen, &mut predictor, b"abc n");
+
+        assert_eq!(
+            predictor
+                .overlay
+                .cells
+                .iter()
+                .filter(|cell| cell.kind == OverlayKind::Printable)
+                .map(|cell| cell.cell.ch)
+                .collect::<String>(),
+            "ow more"
+        );
+        assert!(!predictor.overlay.cells.is_empty());
     }
 
     #[test]
