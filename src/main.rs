@@ -495,13 +495,13 @@ impl Drop for TerminalGuard {
 }
 
 fn terminal_restore_sequence(screen: &Screen, overlay: &Overlay) -> String {
-    let row = final_screen_row(screen, overlay);
     let rows = screen.size().rows.max(1);
     let mut sequence = String::from(terminal_mode_restore_sequence());
-    if row + 1 < rows {
-        sequence.push_str(&format!("\x1b[{};1H\x1b[K", row + 2));
-    } else {
+    if should_scroll_for_restore(screen, overlay) {
         sequence.push_str(&format!("\x1b[{};1H\x1b[K\r\n", rows));
+    } else {
+        let row = restore_target_row(screen, overlay);
+        sequence.push_str(&format!("\x1b[{};1H\x1b[K", row + 1));
     }
     sequence
 }
@@ -514,21 +514,53 @@ fn terminal_mode_restore_sequence() -> &'static str {
     "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1049l\x1b[0m\x1b[?25h"
 }
 
-fn final_screen_row(screen: &Screen, overlay: &Overlay) -> u16 {
+fn should_scroll_for_restore(screen: &Screen, overlay: &Overlay) -> bool {
+    final_content_row(screen, overlay) == Some(screen.size().rows.saturating_sub(1))
+}
+
+fn restore_target_row(screen: &Screen, overlay: &Overlay) -> u16 {
+    let rows = screen.size().rows.max(1);
+    let content_row = final_content_row(screen, overlay);
+    let cursor_row = restore_cursor_row(screen, overlay);
+
+    if content_row.is_none_or(|row| cursor_row > row) && row_is_blank(screen, overlay, cursor_row) {
+        return cursor_row.min(rows.saturating_sub(1));
+    }
+
+    content_row
+        .map(|row| row.saturating_add(1).min(rows.saturating_sub(1)))
+        .unwrap_or(cursor_row.min(rows.saturating_sub(1)))
+}
+
+fn restore_cursor_row(screen: &Screen, overlay: &Overlay) -> u16 {
     let mut row = screen.cursor().row;
     if let Some(cursor) = overlay.cursor {
         row = row.max(cursor.row);
     }
+    row
+}
+
+fn final_content_row(screen: &Screen, overlay: &Overlay) -> Option<u16> {
+    let mut row = None;
     for cell in &overlay.cells {
-        row = row.max(cell.pos.row);
+        row = Some(row.map_or(cell.pos.row, |row: u16| row.max(cell.pos.row)));
     }
     let cols = screen.size().cols.max(1) as usize;
     for (index, cell) in screen.cells().iter().enumerate() {
         if *cell != screen::Cell::default() {
-            row = row.max((index / cols) as u16);
+            let cell_row = (index / cols) as u16;
+            row = Some(row.map_or(cell_row, |row| row.max(cell_row)));
         }
     }
-    row.min(screen.size().rows.saturating_sub(1))
+    row.map(|row| row.min(screen.size().rows.saturating_sub(1)))
+}
+
+fn row_is_blank(screen: &Screen, overlay: &Overlay, row: u16) -> bool {
+    let cols = screen.size().cols;
+    if (0..cols).any(|col| screen.cell(screen::Cursor { row, col }) != screen::Cell::default()) {
+        return false;
+    }
+    !overlay.cells.iter().any(|cell| cell.pos.row == row)
 }
 
 #[cfg(test)]
@@ -629,6 +661,24 @@ mod tests {
         let sequence = terminal_restore_sequence(&screen, &overlay);
 
         assert!(sequence.contains("\x1b[5;1H\x1b[K\r\n"));
+    }
+
+    #[test]
+    fn terminal_restore_uses_blank_cursor_row_after_remote_newline() {
+        let mut screen = Screen::new(Size { cols: 20, rows: 5 });
+        let mut parser = vte::Parser::new();
+        screen.feed(&mut parser, b"command finished\r\nremote done\r\n");
+        let overlay = Overlay {
+            enabled: true,
+            cells: Vec::new(),
+            cursor: None,
+        };
+
+        let sequence = terminal_restore_sequence(&screen, &overlay);
+
+        assert!(sequence.contains("\x1b[3;1H\x1b[K"));
+        assert!(!sequence.contains("\x1b[4;1H\x1b[K"));
+        assert!(!sequence.ends_with("\r\n"));
     }
 
     #[test]
