@@ -152,12 +152,22 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
                             transport.write(&encoded.bytes)?;
                         }
                         predictor.on_key(encoded.intent, &screen);
+                        key_trace.log(format_args!(
+                            "predict cursor {:?} overlay {} overlay_cursor {:?}",
+                            screen.cursor(),
+                            predictor.overlay.cells.len(),
+                            predictor.overlay.cursor
+                        ));
                         dirty = true;
                     }
                 }
                 Some(InputEvent::Resize(cols, rows)) => {
                     let cols = cols.max(1);
                     let rows = rows.max(1);
+                    key_trace.log(format_args!(
+                        "resize {cols}x{rows} current {:?}",
+                        screen.size()
+                    ));
                     if screen.size() == (Size { cols, rows }) {
                         continue;
                     }
