@@ -14,6 +14,13 @@ pub struct OverlayCell {
     pub pos: Cursor,
     pub cell: Cell,
     pub under: Cell,
+    pub kind: OverlayKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverlayKind {
+    Printable,
+    Deletion { remote_seen: bool },
 }
 
 #[derive(Debug, Clone)]
@@ -75,8 +82,14 @@ impl BasePredictor {
         let mut kept = Vec::new();
         let mut conflict = None;
 
-        for (index, cell) in self.overlay.cells.iter().enumerate() {
+        for (index, cell) in self.overlay.cells.iter().copied().enumerate() {
             let confirmed = screen.cell(cell.pos);
+            if is_deletion_prediction(cell) {
+                if let Some(cell) = reconcile_deletion_prediction(cell, confirmed) {
+                    kept.push(cell);
+                }
+                continue;
+            }
             if confirmed == cell.cell || confirmed_matches_prediction(confirmed, cell.cell) {
                 continue;
             }
@@ -84,7 +97,7 @@ impl BasePredictor {
                 conflict = Some(index);
                 break;
             }
-            kept.push(*cell);
+            kept.push(cell);
         }
 
         if let Some(index) = conflict {
@@ -148,6 +161,7 @@ impl BasePredictor {
             pos: cursor,
             cell,
             under,
+            kind: OverlayKind::Printable,
         });
         self.owned.retain(|owned| owned.pos != cursor);
         self.owned.push(OwnedCell { pos: cursor, cell });
@@ -185,7 +199,14 @@ impl BasePredictor {
             .iter()
             .rposition(|cell| cell.pos == target)
         {
-            self.overlay.cells.remove(index);
+            let mut cell = self.overlay.cells[index];
+            if is_deletion_prediction(cell) {
+                self.overlay.cells.remove(index);
+            } else {
+                cell.cell.style = predicted_deletion_style(cell.cell.style);
+                cell.kind = OverlayKind::Deletion { remote_seen: false };
+                self.overlay.cells[index] = cell;
+            }
             self.remove_owned(target);
             self.overlay.cursor = Some(target);
             return;
@@ -205,6 +226,7 @@ impl BasePredictor {
                     style: predicted_deletion_style(under.style),
                 },
                 under,
+                kind: OverlayKind::Deletion { remote_seen: true },
             });
         }
         self.overlay.cursor = Some(target);
@@ -257,21 +279,21 @@ impl BasePredictor {
 
     fn retain_owned_overlay_cells(&mut self) {
         self.owned.retain(|owned| {
-            self.overlay
-                .cells
-                .iter()
-                .any(|cell| cell.pos == owned.pos && cell.cell == owned.cell)
+            self.overlay.cells.iter().any(|cell| {
+                cell.kind == OverlayKind::Printable
+                    && cell.pos == owned.pos
+                    && cell.cell == owned.cell
+            })
         });
     }
 
     fn validate_owned_span(&mut self, screen: &Screen) {
         for owned in &self.owned {
-            if self
-                .overlay
-                .cells
-                .iter()
-                .any(|cell| cell.pos == owned.pos && cell.cell == owned.cell)
-            {
+            if self.overlay.cells.iter().any(|cell| {
+                cell.kind == OverlayKind::Printable
+                    && cell.pos == owned.pos
+                    && cell.cell == owned.cell
+            }) {
                 continue;
             }
             let confirmed = screen.cell(owned.pos);
@@ -353,12 +375,28 @@ fn confirmed_matches_prediction(confirmed: Cell, predicted: Cell) -> bool {
     confirmed.ch == predicted.ch && confirmed.style == predicted_confirmed_style
 }
 
+fn reconcile_deletion_prediction(cell: OverlayCell, confirmed: Cell) -> Option<OverlayCell> {
+    let OverlayKind::Deletion { remote_seen } = cell.kind else {
+        return None;
+    };
+    if confirmed.ch == cell.cell.ch {
+        return Some(OverlayCell {
+            kind: OverlayKind::Deletion { remote_seen: true },
+            ..cell
+        });
+    }
+    if !remote_seen && confirmed == cell.under {
+        return Some(cell);
+    }
+    None
+}
+
 fn is_printable_prediction(cell: OverlayCell) -> bool {
-    !is_deletion_prediction(cell) && (cell.cell.ch != ' ' || cell.under.ch == ' ')
+    cell.kind == OverlayKind::Printable && (cell.cell.ch != ' ' || cell.under.ch == ' ')
 }
 
 fn is_deletion_prediction(cell: OverlayCell) -> bool {
-    cell.cell.ch == cell.under.ch && cell.cell.style.strikethrough && cell.cell.style.dim
+    matches!(cell.kind, OverlayKind::Deletion { .. })
 }
 
 fn remote_cursor_accepts_suffix(
@@ -430,14 +468,23 @@ mod tests {
     }
 
     #[test]
-    fn backspace_removes_overlay() {
+    fn backspace_marks_unconfirmed_overlay_for_deletion() {
         let screen = screen_with(b"");
         let mut predictor = BasePredictor::new(true);
 
         predictor.on_key(KeyIntent::Printable('a'), &screen);
         predictor.on_key(KeyIntent::Backspace, &screen);
 
-        assert!(predictor.overlay.cells.is_empty());
+        assert_eq!(predictor.overlay.cells.len(), 1);
+        assert_eq!(predictor.overlay.cells[0].cell.ch, 'a');
+        assert_eq!(
+            predictor.overlay.cells[0].kind,
+            OverlayKind::Deletion { remote_seen: false }
+        );
+        assert_eq!(predictor.overlay.cells[0].cell.style.fg, Color::Indexed(8));
+        assert!(predictor.overlay.cells[0].cell.style.dim);
+        assert!(predictor.overlay.cells[0].cell.style.strikethrough);
+        assert_eq!(predictor.overlay.cursor, Some(Cursor { row: 0, col: 0 }));
     }
 
     #[test]
@@ -472,7 +519,7 @@ mod tests {
     }
 
     #[test]
-    fn repeated_backspace_hides_confirmed_owned_cells_in_order() {
+    fn repeated_backspace_marks_confirmed_owned_cells_in_order() {
         let mut screen = screen_with(b"$ ");
         let mut predictor = BasePredictor::new(true);
 
@@ -494,6 +541,11 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![4, 3, 2]
         );
+        assert!(predictor
+            .overlay
+            .cells
+            .iter()
+            .all(|cell| cell.cell.style.strikethrough));
         assert_eq!(predictor.overlay.cursor, Some(Cursor { row: 0, col: 2 }));
     }
 
@@ -506,6 +558,35 @@ mod tests {
         feed(&mut screen, b"a");
         predictor.reconcile(&screen);
         predictor.on_key(KeyIntent::Backspace, &screen);
+        feed(&mut screen, b"\x08 \x08");
+        predictor.reconcile(&screen);
+
+        assert!(predictor.overlay.cells.is_empty());
+        assert_eq!(predictor.overlay.cursor, None);
+    }
+
+    #[test]
+    fn unconfirmed_backspace_marker_survives_echo_then_clears_on_delete() {
+        let mut screen = screen_with(b"$ ");
+        let mut predictor = BasePredictor::new(true);
+
+        predictor.on_key(KeyIntent::Printable('a'), &screen);
+        predictor.on_key(KeyIntent::Backspace, &screen);
+        predictor.reconcile(&screen);
+
+        assert_eq!(
+            predictor.overlay.cells[0].kind,
+            OverlayKind::Deletion { remote_seen: false }
+        );
+
+        feed(&mut screen, b"a");
+        predictor.reconcile(&screen);
+
+        assert_eq!(
+            predictor.overlay.cells[0].kind,
+            OverlayKind::Deletion { remote_seen: true }
+        );
+
         feed(&mut screen, b"\x08 \x08");
         predictor.reconcile(&screen);
 
