@@ -41,6 +41,7 @@ def main() -> int:
 
     startup_screen = reduce_terminal(startup_output)
     checks = {
+        "startup stderr warning visible": "Warning fake ssh stderr" in startup_screen,
         "startup login preamble visible": "Welcome fake ssh login" in startup_screen,
         "startup bootstrap command absent": "exec tmux -CC" not in startup_screen,
         "startup prompt not doubled": prompt_line_count(startup_screen) == 1,
@@ -93,6 +94,7 @@ pid, fd = pty.fork()
 if pid == 0:
     if remote_command:
         os.execlp("bash", "bash", "-lc", remote_command)
+    os.write(2, b"Warning fake ssh stderr\r\n")
     os.write(1, b"Welcome fake ssh login\r\n")
     os.execlp("bash", "bash", "--noprofile", "--norc", "-i")
 

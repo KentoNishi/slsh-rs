@@ -150,6 +150,7 @@ class ConptySmoke
         var output = new FileStream(new SafeFileHandle(outputRead, true), FileAccess.Read);
         var seen = new StringBuilder();
         bool sent = false;
+        bool startupChecked = selfTest;
         DateTime sendAt = DateTime.UtcNow.AddSeconds(selfTest ? 1 : 3);
         DateTime deadline = DateTime.UtcNow.AddSeconds(selfTest ? 8 : 25);
         byte[] buffer = new byte[4096];
@@ -174,7 +175,24 @@ class ConptySmoke
         {
             string text;
             lock (seen) text = seen.ToString();
-            if (!sent && (LooksLikePrompt(text) || DateTime.UtcNow >= sendAt))
+            if (!startupChecked && LooksLikePrompt(text))
+            {
+                string screen = ReduceTerminal(text);
+                int prompts = PromptLineCount(screen);
+                if (screen.Contains("exec tmux -CC") || prompts > 1)
+                {
+                    TerminateProcess(pi.hProcess, 1);
+                    Console.Error.WriteLine("windows ConPTY startup screen failed");
+                    Console.Error.WriteLine("Screen:");
+                    Console.Error.WriteLine(screen);
+                    Console.Error.WriteLine("Captured:");
+                    Console.Error.WriteLine(text.Replace("\x1b", "<ESC>"));
+                    Cleanup(pi, attrList, hpc);
+                    return 1;
+                }
+                startupChecked = true;
+            }
+            if (!sent && (startupChecked || DateTime.UtcNow >= sendAt))
             {
                 Type(input, inputText);
                 sent = true;
@@ -253,6 +271,127 @@ class ConptySmoke
     }
 
     static bool LooksLikePrompt(string text) { return text.Contains("$ ") || text.Contains("# ") || text.Contains("> "); }
+
+    static string ReduceTerminal(string text)
+    {
+        const int rows = 30, cols = 100;
+        char[,] screen = new char[rows, cols];
+        for (int r = 0; r < rows; r++)
+            for (int c = 0; c < cols; c++)
+                screen[r, c] = ' ';
+
+        int row = 0, col = 0;
+        for (int i = 0; i < text.Length; i++)
+        {
+            char ch = text[i];
+            if (ch == '\x1b')
+            {
+                i = ApplyEscape(text, i, screen, ref row, ref col);
+                continue;
+            }
+            if (ch == '\r')
+            {
+                col = 0;
+            }
+            else if (ch == '\n')
+            {
+                row++;
+                if (row >= rows)
+                {
+                    Scroll(screen);
+                    row = rows - 1;
+                }
+            }
+            else if (ch >= ' ')
+            {
+                if (row >= 0 && row < rows && col >= 0 && col < cols)
+                    screen[row, col] = ch;
+                if (col + 1 < cols) col++;
+            }
+        }
+
+        var builder = new StringBuilder();
+        for (int r = 0; r < rows; r++)
+        {
+            int end = cols;
+            while (end > 0 && screen[r, end - 1] == ' ') end--;
+            builder.Append(new string(RowChars(screen, r, end)));
+            builder.Append('\n');
+        }
+        return builder.ToString();
+    }
+
+    static int ApplyEscape(string text, int index, char[,] screen, ref int row, ref int col)
+    {
+        if (index + 1 >= text.Length || text[index + 1] != '[') return index;
+        int end = index + 2;
+        while (end < text.Length && !char.IsLetter(text[end])) end++;
+        if (end >= text.Length) return text.Length - 1;
+
+        string body = text.Substring(index + 2, end - index - 2);
+        char action = text[end];
+        if (action == 'J' && body.EndsWith("2", StringComparison.Ordinal))
+            Clear(screen);
+        else if (action == 'K')
+            for (int c = col; c < screen.GetLength(1); c++) screen[row, c] = ' ';
+        else if (action == 'H')
+        {
+            string[] parts = body.Split(';');
+            if (body.Length == 0)
+            {
+                row = 0;
+                col = 0;
+            }
+            else if (parts.Length >= 2)
+            {
+                int r, c;
+                if (int.TryParse(parts[0], out r) && int.TryParse(parts[1], out c))
+                {
+                    row = Math.Max(0, Math.Min(screen.GetLength(0) - 1, r - 1));
+                    col = Math.Max(0, Math.Min(screen.GetLength(1) - 1, c - 1));
+                }
+            }
+        }
+        return end;
+    }
+
+    static int PromptLineCount(string screen)
+    {
+        int count = 0;
+        foreach (string line in screen.Split('\n'))
+        {
+            string trimmed = line.TrimEnd();
+            if (trimmed.EndsWith("$", StringComparison.Ordinal) ||
+                trimmed.EndsWith("#", StringComparison.Ordinal) ||
+                trimmed.EndsWith(">", StringComparison.Ordinal))
+                count++;
+        }
+        return count;
+    }
+
+    static char[] RowChars(char[,] screen, int row, int len)
+    {
+        char[] chars = new char[len];
+        for (int i = 0; i < len; i++) chars[i] = screen[row, i];
+        return chars;
+    }
+
+    static void Clear(char[,] screen)
+    {
+        for (int r = 0; r < screen.GetLength(0); r++)
+            for (int c = 0; c < screen.GetLength(1); c++)
+                screen[r, c] = ' ';
+    }
+
+    static void Scroll(char[,] screen)
+    {
+        int rows = screen.GetLength(0), cols = screen.GetLength(1);
+        for (int r = 0; r < rows - 1; r++)
+            for (int c = 0; c < cols; c++)
+                screen[r, c] = screen[r + 1, c];
+        for (int c = 0; c < cols; c++)
+            screen[rows - 1, c] = ' ';
+    }
 
     static int Count(string text, string needle)
     {

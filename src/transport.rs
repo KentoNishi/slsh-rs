@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use std::io::{Read, Write};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
 pub struct Transport {
@@ -17,27 +17,20 @@ impl Transport {
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::piped())
             .spawn()
             .context("failed to spawn ssh")?;
 
         let stdin = child.stdin.take().context("failed to open ssh stdin")?;
         let stdout = child.stdout.take().context("failed to open ssh stdout")?;
+        let stderr = child.stderr.take().context("failed to open ssh stderr")?;
         let (tx, rx) = mpsc::channel();
+        let stderr_tx = tx.clone();
+        let stdout_reader = thread::spawn(move || read_stream(stdout, tx));
+        let stderr_reader = thread::spawn(move || read_stream(stderr, stderr_tx));
         let reader = thread::spawn(move || {
-            let mut stdout = stdout;
-            let mut buffer = [0; 8192];
-            loop {
-                match stdout.read(&mut buffer) {
-                    Ok(0) => break,
-                    Ok(len) => {
-                        if tx.send(buffer[..len].to_vec()).is_err() {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
         });
 
         Ok(Self {
@@ -77,5 +70,20 @@ impl Transport {
             let _ = reader.join();
         }
         Ok(status)
+    }
+}
+
+fn read_stream(mut stream: impl Read, tx: Sender<Vec<u8>>) {
+    let mut buffer = [0; 8192];
+    loop {
+        match stream.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(len) => {
+                if tx.send(buffer[..len].to_vec()).is_err() {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
     }
 }
