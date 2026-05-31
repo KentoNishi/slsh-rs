@@ -41,6 +41,7 @@ impl Renderer {
             };
         if !output.is_empty() {
             output.insert_str(0, "\x1b[?25l");
+            set_style(&mut output, screen.style());
             output.push_str("\x1b[?25h");
         }
         self.last = Some(next);
@@ -267,6 +268,23 @@ mod tests {
 
         assert!(out.contains("\x1b[38;5;196mA"));
         assert!(out.contains("\x1b[48;2;10;20;30mB"));
+    }
+
+    #[test]
+    fn render_restores_current_remote_style() {
+        let mut screen = screen_with(b"\x1b[31mR\x1b[0m");
+        let mut renderer = Renderer::new();
+        let overlay = Overlay {
+            enabled: true,
+            cells: Vec::new(),
+            cursor: None,
+        };
+        renderer.render(&screen, &overlay);
+        screen.feed(&mut vte::Parser::new(), b"\x1b[1;1H\x1b[32mG\x1b[0m");
+
+        let out = renderer.render(&screen, &overlay);
+
+        assert!(out.ends_with("\x1b[0m\x1b[?25h"));
     }
 
     #[test]

@@ -101,6 +101,10 @@ impl Screen {
         self.cursor
     }
 
+    pub fn style(&self) -> Style {
+        self.style
+    }
+
     #[cfg(test)]
     pub fn active(&self) -> ActiveBuffer {
         self.active
