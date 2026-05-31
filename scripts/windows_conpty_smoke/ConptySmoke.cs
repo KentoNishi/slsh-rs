@@ -1,0 +1,276 @@
+using Microsoft.Win32.SafeHandles;
+using System;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
+
+class ConptySmoke
+{
+    const uint EXTENDED_STARTUPINFO_PRESENT = 0x00080000;
+    const uint CREATE_UNICODE_ENVIRONMENT = 0x00000400;
+    const int STARTF_USESTDHANDLES = 0x00000100;
+    static readonly IntPtr PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE = new IntPtr(0x00020016);
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct COORD { public short X; public short Y; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct STARTUPINFO
+    {
+        public int cb;
+        public IntPtr lpReserved;
+        public IntPtr lpDesktop;
+        public IntPtr lpTitle;
+        public int dwX;
+        public int dwY;
+        public int dwXSize;
+        public int dwYSize;
+        public int dwXCountChars;
+        public int dwYCountChars;
+        public int dwFillAttribute;
+        public int dwFlags;
+        public short wShowWindow;
+        public short cbReserved2;
+        public IntPtr lpReserved2;
+        public IntPtr hStdInput;
+        public IntPtr hStdOutput;
+        public IntPtr hStdError;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct STARTUPINFOEX
+    {
+        public STARTUPINFO StartupInfo;
+        public IntPtr lpAttributeList;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct PROCESS_INFORMATION
+    {
+        public IntPtr hProcess;
+        public IntPtr hThread;
+        public int dwProcessId;
+        public int dwThreadId;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool CreatePipe(out IntPtr hReadPipe, out IntPtr hWritePipe, IntPtr lpPipeAttributes, int nSize);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool CloseHandle(IntPtr hObject);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern int CreatePseudoConsole(COORD size, IntPtr hInput, IntPtr hOutput, uint dwFlags, out IntPtr phPC);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern void ClosePseudoConsole(IntPtr hPC);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool InitializeProcThreadAttributeList(IntPtr lpAttributeList, int dwAttributeCount, int dwFlags, ref IntPtr lpSize);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool UpdateProcThreadAttribute(IntPtr lpAttributeList, uint dwFlags, IntPtr Attribute, IntPtr lpValue, IntPtr cbSize, IntPtr lpPreviousValue, IntPtr lpReturnSize);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern void DeleteProcThreadAttributeList(IntPtr lpAttributeList);
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern bool CreateProcessW(
+        string lpApplicationName,
+        StringBuilder lpCommandLine,
+        IntPtr lpProcessAttributes,
+        IntPtr lpThreadAttributes,
+        bool bInheritHandles,
+        uint dwCreationFlags,
+        IntPtr lpEnvironment,
+        string lpCurrentDirectory,
+        ref STARTUPINFOEX lpStartupInfo,
+        out PROCESS_INFORMATION lpProcessInformation);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool TerminateProcess(IntPtr hProcess, uint uExitCode);
+
+    static int Main(string[] args)
+    {
+        bool selfTest = args.Length > 0 && args[0] == "--self-test";
+        string exe = selfTest ? Environment.GetEnvironmentVariable("COMSPEC") : (args.Length > 0 ? args[0] : "slsh.exe");
+        string commandLine = selfTest ? Quote(exe) + " /k" : Quote(exe) + " " + (args.Length > 1 ? args[1] : "wsl");
+        string workdir = Path.GetDirectoryName(exe);
+        string marker = selfTest ? "CONPTYSELFOK" : "SLSHCONPTYOK";
+        string inputText = selfTest ? "echo CONPTYSELFOK\r" : "echo SLSHCONPTYx\x7fOK\r";
+        string logPath = Path.Combine(Path.GetTempPath(), "slsh-conpty-keys.log");
+        if (File.Exists(logPath)) File.Delete(logPath);
+
+        IntPtr inputRead, inputWrite, outputRead, outputWrite;
+        Check(CreatePipe(out inputRead, out inputWrite, IntPtr.Zero, 0), "CreatePipe input");
+        Check(CreatePipe(out outputRead, out outputWrite, IntPtr.Zero, 0), "CreatePipe output");
+
+        IntPtr hpc;
+        int hr = CreatePseudoConsole(new COORD { X = 100, Y = 30 }, inputRead, outputWrite, 0, out hpc);
+        if (hr != 0) throw new InvalidOperationException("CreatePseudoConsole failed: 0x" + hr.ToString("x"));
+        CloseHandle(inputRead);
+        CloseHandle(outputWrite);
+
+        IntPtr attrSize = IntPtr.Zero;
+        InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref attrSize);
+        IntPtr attrList = Marshal.AllocHGlobal(attrSize);
+        Check(InitializeProcThreadAttributeList(attrList, 1, 0, ref attrSize), "InitializeProcThreadAttributeList");
+        Check(UpdateProcThreadAttribute(attrList, 0, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, hpc, new IntPtr(IntPtr.Size), IntPtr.Zero, IntPtr.Zero), "UpdateProcThreadAttribute");
+
+        STARTUPINFOEX si = new STARTUPINFOEX();
+        si.StartupInfo.cb = Marshal.SizeOf(typeof(STARTUPINFOEX));
+        si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+        si.StartupInfo.hStdInput = new IntPtr(-1);
+        si.StartupInfo.hStdOutput = new IntPtr(-1);
+        si.StartupInfo.hStdError = new IntPtr(-1);
+        si.lpAttributeList = attrList;
+
+        PROCESS_INFORMATION pi;
+        string envBlock = BuildEnvironmentBlock("SLSH_KEY_LOG", logPath);
+        IntPtr env = Marshal.StringToHGlobalUni(envBlock);
+        bool started = CreateProcessW(
+            null,
+            new StringBuilder(commandLine),
+            IntPtr.Zero,
+            IntPtr.Zero,
+            false,
+            EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
+            env,
+            workdir,
+            ref si,
+            out pi);
+        Marshal.FreeHGlobal(env);
+        Check(started, "CreateProcessW");
+
+        var input = new FileStream(new SafeFileHandle(inputWrite, true), FileAccess.Write);
+        var output = new FileStream(new SafeFileHandle(outputRead, true), FileAccess.Read);
+        var seen = new StringBuilder();
+        bool sent = false;
+        DateTime sendAt = DateTime.UtcNow.AddSeconds(selfTest ? 1 : 3);
+        DateTime deadline = DateTime.UtcNow.AddSeconds(selfTest ? 8 : 25);
+        byte[] buffer = new byte[4096];
+
+        Thread reader = new Thread(() =>
+        {
+            while (true)
+            {
+                int n;
+                try { n = output.Read(buffer, 0, buffer.Length); }
+                catch { break; }
+                if (n <= 0) break;
+                string chunk = Encoding.UTF8.GetString(buffer, 0, n);
+                lock (seen) seen.Append(chunk);
+                if (chunk.Contains("\x1b[6n")) Write(input, "\x1b[1;1R");
+            }
+        });
+        reader.IsBackground = true;
+        reader.Start();
+
+        while (DateTime.UtcNow < deadline)
+        {
+            string text;
+            lock (seen) text = seen.ToString();
+            if (!sent && (LooksLikePrompt(text) || DateTime.UtcNow >= sendAt))
+            {
+                Type(input, inputText);
+                sent = true;
+            }
+            if (Count(text, marker) >= (selfTest ? 1 : 2))
+            {
+                Write(input, "exit\r");
+                Cleanup(pi, attrList, hpc);
+                Console.WriteLine("windows ConPTY smoke passed");
+                if (File.Exists(logPath)) Console.WriteLine(ReadShared(logPath));
+                return 0;
+            }
+            Thread.Sleep(50);
+        }
+
+        TerminateProcess(pi.hProcess, 1);
+        Console.Error.WriteLine("windows ConPTY smoke failed");
+        Console.Error.WriteLine("Captured:");
+        lock (seen) Console.Error.WriteLine(seen.ToString().Replace("\x1b", "<ESC>"));
+        if (File.Exists(logPath))
+        {
+            Console.Error.WriteLine("Key log:");
+            Console.Error.WriteLine(ReadShared(logPath));
+        }
+        Cleanup(pi, attrList, hpc);
+        return 1;
+    }
+
+    static void Cleanup(PROCESS_INFORMATION pi, IntPtr attrList, IntPtr hpc)
+    {
+        WaitForSingleObject(pi.hProcess, 3000);
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        DeleteProcThreadAttributeList(attrList);
+        Marshal.FreeHGlobal(attrList);
+        ClosePseudoConsole(hpc);
+    }
+
+    static string BuildEnvironmentBlock(string name, string value)
+    {
+        var env = Environment.GetEnvironmentVariables();
+        var pairs = new System.Collections.Generic.List<string>();
+        foreach (System.Collections.DictionaryEntry entry in env)
+        {
+            if (!string.Equals((string)entry.Key, name, StringComparison.OrdinalIgnoreCase))
+                pairs.Add((string)entry.Key + "=" + (string)entry.Value);
+        }
+        pairs.Add(name + "=" + value);
+        pairs.Sort(StringComparer.OrdinalIgnoreCase);
+        return string.Join("\0", pairs.ToArray()) + "\0\0";
+    }
+
+    static string Quote(string value) { return "\"" + value.Replace("\"", "\\\"") + "\""; }
+
+    static void Write(Stream stream, string text)
+    {
+        byte[] bytes = Encoding.UTF8.GetBytes(text);
+        stream.Write(bytes, 0, bytes.Length);
+        stream.Flush();
+    }
+
+    static void Type(Stream stream, string text)
+    {
+        foreach (char ch in text)
+        {
+            Write(stream, ch.ToString());
+            Thread.Sleep(25);
+        }
+    }
+
+    static string ReadShared(string path)
+    {
+        using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+        using (var reader = new StreamReader(stream))
+            return reader.ReadToEnd();
+    }
+
+    static bool LooksLikePrompt(string text) { return text.Contains("$ ") || text.Contains("# ") || text.Contains("> "); }
+
+    static int Count(string text, string needle)
+    {
+        int count = 0, index = 0;
+        while ((index = text.IndexOf(needle, index, StringComparison.Ordinal)) >= 0)
+        {
+            count++;
+            index += needle.Length;
+        }
+        return count;
+    }
+
+    static void Check(bool ok, string label)
+    {
+        if (!ok)
+        {
+            int error = Marshal.GetLastWin32Error();
+            throw new System.ComponentModel.Win32Exception(error, label + " failed with " + error);
+        }
+    }
+}
