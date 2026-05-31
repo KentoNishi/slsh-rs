@@ -179,6 +179,16 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
                     raw_synced = false;
                 }
                 #[cfg(not(windows))]
+                Some(InputEvent::Mouse(mouse)) => {
+                    let bytes = key::encode_mouse(mouse);
+                    key_trace.log(format_args!("mouse {:?} bytes {:?}", mouse, bytes));
+                    if !bytes.is_empty() {
+                        transport.write(&bytes)?;
+                    }
+                    predictor.clear();
+                    dirty = true;
+                }
+                #[cfg(not(windows))]
                 Some(InputEvent::Paste(text)) => {
                     let bytes = key::encode_paste(&text);
                     key_trace.log(format_args!("paste {:?} bytes {:?}", text, bytes));
@@ -379,7 +389,38 @@ fn contains_terminal_mode_change(bytes: &[u8]) -> bool {
         bytes
             .windows(pattern.len())
             .any(|window| window == *pattern)
-    })
+    }) || contains_private_mode_change(bytes, &[1000, 1002, 1003, 1005, 1006, 1015])
+}
+
+fn contains_private_mode_change(bytes: &[u8], modes: &[u16]) -> bool {
+    let mut index = 0;
+    while let Some(start) = find_bytes(&bytes[index..], b"\x1b[?") {
+        index += start + 3;
+        let params_start = index;
+        while index < bytes.len() && (bytes[index].is_ascii_digit() || bytes[index] == b';') {
+            index += 1;
+        }
+        if index < bytes.len()
+            && matches!(bytes[index], b'h' | b'l')
+            && private_mode_params_contain(&bytes[params_start..index], modes)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn private_mode_params_contain(params: &[u8], modes: &[u16]) -> bool {
+    params
+        .split(|byte| *byte == b';')
+        .filter_map(|param| std::str::from_utf8(param).ok()?.parse::<u16>().ok())
+        .any(|mode| modes.contains(&mode))
 }
 
 struct TerminalGuard;
@@ -416,7 +457,9 @@ impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = execute!(
             io::stdout(),
-            crossterm::style::Print("\x1b[0m\x1b[?1049l"),
+            crossterm::style::Print(
+                "\x1b[0m\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1049l"
+            ),
             ResetColor,
             Show
         );
@@ -462,7 +505,11 @@ mod tests {
         assert!(contains_terminal_mode_change(b"\x1b[?1049l"));
         assert!(contains_terminal_mode_change(b"\x1b[?1h"));
         assert!(contains_terminal_mode_change(b"\x1b[?1l"));
+        assert!(contains_terminal_mode_change(b"\x1b[?1006h"));
+        assert!(contains_terminal_mode_change(b"\x1b[?1000;1006h"));
+        assert!(contains_terminal_mode_change(b"abc\x1b[?1002l"));
         assert!(!contains_terminal_mode_change(b"\x1b[31mred"));
+        assert!(!contains_terminal_mode_change(b"\x1b[?25l"));
     }
 
     #[test]

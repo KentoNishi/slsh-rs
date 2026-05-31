@@ -27,6 +27,7 @@ def main() -> int:
     scrolled_overlay_output = run_scrolled_overlay()
     app_prefix_output = run_app_prefix_guard()
     app_cursor_output = run_app_cursor_overlay()
+    mouse_output = run_mouse_forwarding()
 
     failed = []
     if marker not in output:
@@ -49,6 +50,8 @@ def main() -> int:
         failed.append("nonlinear prefix suppresses next printable overlay")
     if b"Z" not in app_cursor_output or b"\x1b[2;1H" not in app_cursor_output:
         failed.append("app cursor overlay row")
+    if b"SLSHMOUSEOK" not in mouse_output:
+        failed.append("mouse forwarding")
 
     if failed:
         sys.stderr.write("loopback smoke failed: marker missing\n")
@@ -70,6 +73,8 @@ def main() -> int:
         sys.stderr.buffer.write(app_prefix_output)
         sys.stderr.write("\nApp cursor bytes:\n")
         sys.stderr.buffer.write(app_cursor_output)
+        sys.stderr.write("\nMouse bytes:\n")
+        sys.stderr.buffer.write(mouse_output)
         sys.stderr.write("\n")
         return 1
 
@@ -463,6 +468,63 @@ def run_app_cursor_overlay() -> bytes:
             pass
 
     return output[probe_start:]
+
+
+def run_mouse_forwarding() -> bytes:
+    argv = [os.path.join(ROOT, "target", "debug", "slsh"), "ignored-host"]
+    env = os.environ.copy()
+    env["SLSH_LOOPBACK"] = "1"
+    env.setdefault("SHELL", "/bin/sh")
+
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.execvpe(argv[0], argv, env)
+
+    termios.tcflush(fd, termios.TCIOFLUSH)
+    os.set_blocking(fd, False)
+    fcntl_rows_cols(fd, 24, 80)
+
+    app = (
+        "python3 -c 'import os,sys,tty;"
+        "tty.setraw(0);"
+        "sys.stdout.write(\"\\033[?1049h\\033[?1000h\\033[?1006hMOUSE_READY\\r\\n\");"
+        "sys.stdout.flush();"
+        "data=os.read(0,32);"
+        "ok=data.startswith(b\"\\033[<0;10;5M\");"
+        "sys.stdout.write(\"\\033[?1006l\\033[?1000l\\033[?1049l\" + (\"SLSHMOUSEOK\\n\" if ok else (\"SLSHMOUSEBAD %r\\n\" % (data,))));"
+        "sys.stdout.flush()'\r"
+    ).encode()
+
+    output = b""
+    sent_app = False
+    sent_mouse = False
+    deadline = time.time() + 12
+    try:
+        while time.time() < deadline:
+            readable, _, _ = select.select([fd], [], [], 0.02)
+            if readable:
+                try:
+                    output += os.read(fd, 4096)
+                except BlockingIOError:
+                    pass
+                except OSError:
+                    return output
+
+            if not sent_app and (b"$" in output or b"#" in output):
+                os.write(fd, b"\x1b[200~" + app + b"\x1b[201~")
+                sent_app = True
+            if sent_app and not sent_mouse and b"MOUSE_READY" in output:
+                os.write(fd, b"\x1b[<0;10;5M")
+                sent_mouse = True
+            if b"SLSHMOUSEOK" in output or b"SLSHMOUSEBAD" in output:
+                return output
+    finally:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+
+    return output
 
 
 def run_and_collect(argv: list[str], env: dict[str, str]) -> bytes:

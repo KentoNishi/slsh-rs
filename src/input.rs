@@ -1,10 +1,14 @@
 use crossterm::event::KeyEvent;
+#[cfg(not(windows))]
+use crossterm::event::MouseEvent;
 use std::io;
 use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputEvent {
     Key(KeyEvent),
+    #[cfg(not(windows))]
+    Mouse(MouseEvent),
     #[cfg(not(windows))]
     Paste(String),
     Resize(u16, u16),
@@ -19,6 +23,7 @@ pub fn poll(timeout: Duration) -> io::Result<bool> {
 pub fn read() -> io::Result<Option<InputEvent>> {
     match crossterm::event::read()? {
         crossterm::event::Event::Key(key) => Ok(Some(InputEvent::Key(key))),
+        crossterm::event::Event::Mouse(mouse) => Ok(Some(InputEvent::Mouse(mouse))),
         crossterm::event::Event::Paste(text) => Ok(Some(InputEvent::Paste(text))),
         crossterm::event::Event::Resize(cols, rows) => Ok(Some(InputEvent::Resize(cols, rows))),
         _ => Ok(None),
