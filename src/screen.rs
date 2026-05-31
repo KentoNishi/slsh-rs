@@ -63,7 +63,9 @@ pub struct Screen {
     scroll_bottom: u16,
     style: Style,
     wrap_next: bool,
-    dec_special_graphics: bool,
+    g0_dec_special_graphics: bool,
+    g1_dec_special_graphics: bool,
+    using_g1: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -85,7 +87,9 @@ impl Screen {
             scroll_bottom: bottom,
             style: Style::default(),
             wrap_next: false,
-            dec_special_graphics: false,
+            g0_dec_special_graphics: false,
+            g1_dec_special_graphics: false,
+            using_g1: false,
         }
     }
 
@@ -170,7 +174,7 @@ impl Screen {
     }
 
     fn put_char(&mut self, ch: char) {
-        let ch = if self.dec_special_graphics {
+        let ch = if self.active_charset_is_dec_special_graphics() {
             map_dec_special_graphics(ch)
         } else {
             ch
@@ -348,6 +352,14 @@ impl Screen {
         };
     }
 
+    fn active_charset_is_dec_special_graphics(&self) -> bool {
+        if self.using_g1 {
+            self.g1_dec_special_graphics
+        } else {
+            self.g0_dec_special_graphics
+        }
+    }
+
     fn set_style(&mut self, params: &Params) {
         if params.is_empty() {
             self.style = Style::default();
@@ -489,6 +501,8 @@ impl Perform for Screen {
             }
             0x08 => self.backspace(),
             b'\t' => self.tab(),
+            0x0e => self.using_g1 = true,
+            0x0f => self.using_g1 = false,
             _ => {}
         }
     }
@@ -537,11 +551,18 @@ impl Perform for Screen {
             return;
         }
 
-        if intermediates == b"(" {
-            match byte {
-                b'0' => self.dec_special_graphics = true,
-                b'B' => self.dec_special_graphics = false,
-                _ => {}
+        if matches!(intermediates, b"(" | b")") {
+            let enabled = match byte {
+                b'0' => Some(true),
+                b'B' => Some(false),
+                _ => None,
+            };
+            if let Some(enabled) = enabled {
+                if intermediates == b"(" {
+                    self.g0_dec_special_graphics = enabled;
+                } else {
+                    self.g1_dec_special_graphics = enabled;
+                }
             }
             return;
         }
@@ -832,6 +853,18 @@ mod tests {
         let mut screen = Screen::new(Size { cols: 4, rows: 1 });
 
         feed(&mut screen, b"\x1b(0lqk\x1b(Bx");
+
+        assert_eq!(screen.cell(Cursor { row: 0, col: 0 }).ch, '┌');
+        assert_eq!(screen.cell(Cursor { row: 0, col: 1 }).ch, '─');
+        assert_eq!(screen.cell(Cursor { row: 0, col: 2 }).ch, '┐');
+        assert_eq!(screen.cell(Cursor { row: 0, col: 3 }).ch, 'x');
+    }
+
+    #[test]
+    fn maps_shifted_dec_special_graphics() {
+        let mut screen = Screen::new(Size { cols: 4, rows: 1 });
+
+        feed(&mut screen, b"\x1b)0\x0elqk\x0fx");
 
         assert_eq!(screen.cell(Cursor { row: 0, col: 0 }).ch, '┌');
         assert_eq!(screen.cell(Cursor { row: 0, col: 1 }).ch, '─');

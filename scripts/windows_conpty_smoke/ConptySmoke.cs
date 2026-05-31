@@ -102,7 +102,9 @@ class ConptySmoke
         string commandLine = selfTest ? Quote(exe) + " /k" : Quote(exe) + " " + (args.Length > (startupDump ? 2 : 1) ? args[startupDump ? 2 : 1] : "wsl");
         string workdir = Path.GetDirectoryName(exe);
         string marker = selfTest ? "CONPTYSELFOK" : "SLSHCONPTYOK";
-        string inputText = selfTest ? "echo CONPTYSELFOK\r" : "echo SLSHCONPTYx\x7fOK\r";
+        string inputText = selfTest
+            ? "echo CONPTYSELFOK\r"
+            : "echo SLSHCONPTYx\x7fOK; printf '\\033[31mSLSHRED\\033[0m\\n\\016lqk\\017\\n'\r";
         string logPath = Path.Combine(Path.GetTempPath(), "slsh-conpty-keys.log");
         if (File.Exists(logPath)) File.Delete(logPath);
 
@@ -218,6 +220,22 @@ class ConptySmoke
             }
             if (Count(text, marker) >= 1)
             {
+                if (!selfTest && (!ContainsRedText(text, "SLSHRED") || !text.Contains("┌─┐")))
+                {
+                    TerminateProcess(pi.hProcess, 1);
+                    Console.Error.WriteLine("windows ConPTY render screen failed");
+                    Console.Error.WriteLine("Screen:");
+                    Console.Error.WriteLine(ReduceTerminal(text));
+                    Console.Error.WriteLine("Captured:");
+                    Console.Error.WriteLine(text.Replace("\x1b", "<ESC>"));
+                    if (File.Exists(logPath))
+                    {
+                        Console.Error.WriteLine("Key log:");
+                        Console.Error.WriteLine(ReadShared(logPath));
+                    }
+                    Cleanup(pi, attrList, hpc);
+                    return 1;
+                }
                 Write(input, "exit\r");
                 Cleanup(pi, attrList, hpc);
                 Console.WriteLine("windows ConPTY smoke passed");
@@ -297,6 +315,57 @@ class ConptySmoke
         return !screen.Contains("exec tmux -CC") && PromptLineCount(screen) <= 1;
     }
 
+    static bool ContainsRedText(string text, string marker)
+    {
+        bool red = false;
+        int matched = 0;
+        for (int i = 0; i < text.Length; i++)
+        {
+            char ch = text[i];
+            if (ch == '\x1b')
+            {
+                int end = i + 1;
+                if (end < text.Length && text[end] == '[')
+                {
+                    end++;
+                    while (end < text.Length && !char.IsLetter(text[end])) end++;
+                    if (end < text.Length && text[end] == 'm')
+                    {
+                        string body = text.Substring(i + 2, end - i - 2);
+                        red = SgrSetsRed(body, red);
+                    }
+                    i = end;
+                    continue;
+                }
+            }
+
+            if (red && ch == marker[matched])
+            {
+                matched++;
+                if (matched == marker.Length) return true;
+            }
+            else
+            {
+                matched = red && ch == marker[0] ? 1 : 0;
+            }
+        }
+        return false;
+    }
+
+    static bool SgrSetsRed(string body, bool current)
+    {
+        string[] parts = body.Length == 0 ? new string[] { "0" } : body.Split(';');
+        bool red = current;
+        for (int i = 0; i < parts.Length; i++)
+        {
+            int value;
+            if (!int.TryParse(parts[i].Length == 0 ? "0" : parts[i], out value)) continue;
+            if (value == 0 || value == 39) red = false;
+            if (value == 31 || value == 91) red = true;
+        }
+        return red;
+    }
+
     static string ReduceTerminal(string text)
     {
         const int rows = 30, cols = 100;
@@ -359,6 +428,19 @@ class ConptySmoke
             Clear(screen);
         else if (action == 'K')
             for (int c = col; c < screen.GetLength(1); c++) screen[row, c] = ' ';
+        else if (action == 'X')
+        {
+            int count = ParseFirst(body, 1);
+            for (int c = col; c < Math.Min(screen.GetLength(1), col + count); c++) screen[row, c] = ' ';
+        }
+        else if (action == 'C')
+        {
+            col = Math.Min(screen.GetLength(1) - 1, col + ParseFirst(body, 1));
+        }
+        else if (action == 'D')
+        {
+            col = Math.Max(0, col - ParseFirst(body, 1));
+        }
         else if (action == 'H')
         {
             string[] parts = body.Split(';');
@@ -378,6 +460,14 @@ class ConptySmoke
             }
         }
         return end;
+    }
+
+    static int ParseFirst(string body, int fallback)
+    {
+        string[] parts = body.Split(';');
+        int value;
+        if (parts.Length > 0 && int.TryParse(parts[0], out value) && value > 0) return value;
+        return fallback;
     }
 
     static int PromptLineCount(string screen)
