@@ -21,6 +21,7 @@ pub struct BasePredictor {
     pub overlay: Overlay,
     owned: Vec<OwnedCell>,
     edit_anchor: Option<Cursor>,
+    submitted: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +40,7 @@ impl BasePredictor {
             },
             owned: Vec::new(),
             edit_anchor: None,
+            submitted: false,
         }
     }
 
@@ -52,12 +54,14 @@ impl BasePredictor {
         self.overlay.cursor = None;
         self.owned.clear();
         self.edit_anchor = None;
+        self.submitted = false;
     }
 
     pub fn on_key(&mut self, intent: KeyIntent, screen: &Screen) {
         match intent {
             KeyIntent::Printable(ch) => self.predict_printable(ch, screen),
             KeyIntent::Backspace => self.predict_backspace(screen),
+            KeyIntent::Submit => self.submit(),
             KeyIntent::TogglePrediction => self.toggle(),
             KeyIntent::Nonlinear | KeyIntent::Unsupported => self.clear(),
         }
@@ -101,6 +105,9 @@ impl BasePredictor {
     }
 
     fn predict_printable(&mut self, ch: char, screen: &Screen) {
+        if self.submitted {
+            return;
+        }
         if !self.overlay.enabled || hidden_input_guard(screen) {
             self.clear();
             return;
@@ -155,6 +162,9 @@ impl BasePredictor {
     }
 
     fn predict_backspace(&mut self, screen: &Screen) {
+        if self.submitted {
+            return;
+        }
         if !self.overlay.enabled || hidden_input_guard(screen) {
             self.clear();
             return;
@@ -194,6 +204,12 @@ impl BasePredictor {
             });
         }
         self.overlay.cursor = Some(target);
+    }
+
+    fn submit(&mut self) {
+        if !self.overlay.cells.is_empty() || !self.owned.is_empty() {
+            self.submitted = true;
+        }
     }
 
     fn backspace_target(&self, screen: &Screen) -> Option<Cursor> {
@@ -502,6 +518,67 @@ mod tests {
         predictor.on_key(KeyIntent::Nonlinear, &screen);
 
         assert!(predictor.overlay.cells.is_empty());
+    }
+
+    #[test]
+    fn submit_keeps_pending_overlay_visible() {
+        let screen = screen_with(b"$ ");
+        let mut predictor = BasePredictor::new(true);
+
+        for ch in "echo hi".chars() {
+            predictor.on_key(KeyIntent::Printable(ch), &screen);
+        }
+        predictor.on_key(KeyIntent::Submit, &screen);
+
+        assert_eq!(
+            predictor
+                .overlay
+                .cells
+                .iter()
+                .map(|cell| cell.cell.ch)
+                .collect::<String>(),
+            "echo hi"
+        );
+        assert!(predictor.submitted);
+    }
+
+    #[test]
+    fn submitted_overlay_does_not_extend_before_remote_catches_up() {
+        let screen = screen_with(b"$ ");
+        let mut predictor = BasePredictor::new(true);
+
+        for ch in "echo hi".chars() {
+            predictor.on_key(KeyIntent::Printable(ch), &screen);
+        }
+        predictor.on_key(KeyIntent::Submit, &screen);
+        predictor.on_key(KeyIntent::Printable('x'), &screen);
+        predictor.on_key(KeyIntent::Backspace, &screen);
+
+        assert_eq!(
+            predictor
+                .overlay
+                .cells
+                .iter()
+                .map(|cell| cell.cell.ch)
+                .collect::<String>(),
+            "echo hi"
+        );
+    }
+
+    #[test]
+    fn submitted_overlay_clears_after_remote_moves_to_next_prompt() {
+        let mut screen = screen_with(b"$ ");
+        let mut predictor = BasePredictor::new(true);
+
+        for ch in "echo hi".chars() {
+            predictor.on_key(KeyIntent::Printable(ch), &screen);
+        }
+        predictor.on_key(KeyIntent::Submit, &screen);
+        feed(&mut screen, b"echo hi\r\nhi\r\n$ ");
+        predictor.reconcile(&screen);
+
+        assert!(predictor.overlay.cells.is_empty());
+        assert!(!predictor.submitted);
     }
 
     #[test]
