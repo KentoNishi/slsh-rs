@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{Read, Write};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::thread::{self, JoinHandle};
@@ -7,7 +7,7 @@ use std::thread::{self, JoinHandle};
 pub struct Transport {
     child: Child,
     stdin: ChildStdin,
-    lines: Receiver<String>,
+    chunks: Receiver<Vec<u8>>,
     reader: Option<JoinHandle<()>>,
 }
 
@@ -25,11 +25,13 @@ impl Transport {
         let stdout = child.stdout.take().context("failed to open ssh stdout")?;
         let (tx, rx) = mpsc::channel();
         let reader = thread::spawn(move || {
-            let reader = BufReader::new(stdout);
-            for line in reader.lines() {
-                match line {
-                    Ok(line) => {
-                        if tx.send(line).is_err() {
+            let mut stdout = stdout;
+            let mut buffer = [0; 8192];
+            loop {
+                match stdout.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(len) => {
+                        if tx.send(buffer[..len].to_vec()).is_err() {
                             break;
                         }
                     }
@@ -41,7 +43,7 @@ impl Transport {
         Ok(Self {
             child,
             stdin,
-            lines: rx,
+            chunks: rx,
             reader: Some(reader),
         })
     }
@@ -53,12 +55,12 @@ impl Transport {
         self.stdin.flush().context("failed to flush tmux command")
     }
 
-    pub fn drain_lines(&mut self) -> Vec<String> {
-        let mut lines = Vec::new();
-        while let Ok(line) = self.lines.try_recv() {
-            lines.push(line);
+    pub fn drain_chunks(&mut self) -> Vec<Vec<u8>> {
+        let mut chunks = Vec::new();
+        while let Ok(chunk) = self.chunks.try_recv() {
+            chunks.push(chunk);
         }
-        lines
+        chunks
     }
 
     pub fn try_wait(&mut self) -> Result<Option<ExitStatus>> {
