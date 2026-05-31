@@ -113,13 +113,6 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
             match event::read().context("failed to read terminal input")? {
                 Event::Key(key) => {
                     let mapped = tmux::key_to_tmux(key, active_pane.as_deref());
-                    key_trace.log(format_args!(
-                        "key {:?} pane {:?} command {:?} intent {:?}",
-                        key,
-                        active_pane,
-                        mapped.command.as_deref(),
-                        mapped.intent
-                    ));
                     let should_forward = match key.kind {
                         KeyEventKind::Press | KeyEventKind::Repeat => {
                             pressed_keys.insert(key_fingerprint(key));
@@ -127,6 +120,13 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
                         }
                         KeyEventKind::Release => !pressed_keys.remove(&key_fingerprint(key)),
                     };
+                    key_trace.log(format_args!(
+                        "key {:?} pane {:?} forwarded {should_forward} command {:?} intent {:?}",
+                        key,
+                        active_pane,
+                        mapped.command.as_deref(),
+                        mapped.intent
+                    ));
                     if should_forward {
                         if let Some(command) = mapped.command {
                             transport.write_command(&command)?;
