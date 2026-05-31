@@ -91,7 +91,7 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
     let mut bootstrap = LoginBootstrap::new(login_bootstrap.then_some(launcher));
     let mut stdout = io::stdout();
     let mut done = false;
-    let mut control_started = false;
+    let mut input_ready = false;
     let mut key_trace = KeyTrace::from_env();
     let mut pressed_keys = HashSet::new();
 
@@ -110,9 +110,9 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
                         }
                     }
                     StreamEvent::Control(ControlEvent::Output { pane, bytes }) => {
-                        control_started = true;
                         bootstrap.note_control();
                         active_pane = Some(pane);
+                        input_ready = true;
                         screen.feed(&mut parser, &bytes);
                         predictor.reconcile(&screen);
                         dirty = true;
@@ -127,7 +127,6 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
                         anyhow::bail!("tmux error: {error}");
                     }
                     StreamEvent::Control(ControlEvent::Notification(_)) => {
-                        control_started = true;
                         bootstrap.note_control();
                     }
                 }
@@ -145,7 +144,7 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
             }
         }
 
-        if control_started {
+        if input_ready {
             while input::poll(Duration::from_millis(1)).context("failed to poll terminal input")? {
                 match input::read().context("failed to read terminal input")? {
                     Some(InputEvent::Key(key)) => {
