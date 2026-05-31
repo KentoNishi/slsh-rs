@@ -125,6 +125,17 @@ fn emit_row_span(out: &mut String, frame: &Frame, row: u16, start: u16, end: u16
         return;
     }
 
+    if end == frame.size.cols {
+        let suffix = default_suffix_start(frame, row, start, end);
+        if suffix < end {
+            emit_row_span(out, frame, row, start, suffix);
+            move_cursor(out, Cursor { row, col: suffix });
+            set_style(out, Style::default());
+            out.push_str("\x1b[K");
+            return;
+        }
+    }
+
     let first = row as usize * frame.size.cols as usize + start as usize;
     move_cursor(out, Cursor { row, col: start });
     set_style(out, frame.cells[first].style);
@@ -132,6 +143,18 @@ fn emit_row_span(out: &mut String, frame: &Frame, row: u16, start: u16, end: u16
         let index = row as usize * frame.size.cols as usize + col as usize;
         out.push(frame.cells[index].ch);
     }
+}
+
+fn default_suffix_start(frame: &Frame, row: u16, start: u16, end: u16) -> u16 {
+    let mut suffix = end;
+    while suffix > start {
+        let index = row as usize * frame.size.cols as usize + suffix as usize - 1;
+        if frame.cells[index] != Cell::default() {
+            break;
+        }
+        suffix -= 1;
+    }
+    suffix
 }
 
 fn move_cursor(out: &mut String, cursor: Cursor) {
@@ -255,6 +278,25 @@ mod tests {
         assert!(out.contains("\x1b[1;2H"));
         assert!(out.contains('a'));
         assert!(!out.contains("ha"));
+    }
+
+    #[test]
+    fn second_render_clears_default_tail_with_erase_line() {
+        let mut renderer = Renderer::new();
+        let overlay = Overlay {
+            enabled: true,
+            cells: Vec::new(),
+            cursor: None,
+        };
+        let first = screen_with(b"hello");
+        renderer.render(&first, &overlay);
+
+        let second = screen_with(b"hi");
+        let out = renderer.render(&second, &overlay);
+
+        assert!(!out.contains("\x1b[2J"));
+        assert!(out.contains("\x1b[1;3H\x1b[0m\x1b[K"));
+        assert!(!out.contains("   "));
     }
 
     #[test]
