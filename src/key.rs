@@ -25,45 +25,58 @@ pub fn encode_key(event: KeyEvent) -> EncodedKey {
     if modifiers.contains(KeyModifiers::CONTROL) {
         if let KeyCode::Char(ch) = event.code {
             if let Some(byte) = control_byte(ch) {
-                return bytes(vec![byte], KeyIntent::Nonlinear);
+                return modified_bytes(vec![byte], modifiers, KeyIntent::Nonlinear);
             }
         }
     }
 
-    let alt = modifiers.contains(KeyModifiers::ALT);
     let encoded = match event.code {
-        KeyCode::Char('\r' | '\n') | KeyCode::Enter => bytes(vec![b'\r'], KeyIntent::Nonlinear),
-        KeyCode::Char('\t') | KeyCode::Tab => bytes(vec![b'\t'], KeyIntent::Nonlinear),
-        KeyCode::Char('\u{8}' | '\u{7f}') | KeyCode::Backspace => {
-            bytes(vec![0x7f], KeyIntent::Backspace)
+        KeyCode::Char('\r' | '\n') | KeyCode::Enter => {
+            if let Some(sequence) = modified_other_key(13, modifiers) {
+                bytes(sequence, KeyIntent::Nonlinear)
+            } else {
+                modified_bytes(vec![b'\r'], modifiers, KeyIntent::Nonlinear)
+            }
         }
+        KeyCode::Char('\t') | KeyCode::Tab => {
+            if let Some(sequence) = modified_other_key(9, modifiers) {
+                bytes(sequence, KeyIntent::Nonlinear)
+            } else {
+                modified_bytes(vec![b'\t'], modifiers, KeyIntent::Nonlinear)
+            }
+        }
+        KeyCode::Char('\u{8}' | '\u{7f}') | KeyCode::Backspace => match xterm_modifier(modifiers) {
+            Some(5) => bytes(vec![0x17], KeyIntent::Backspace),
+            Some(_) => modified_bytes(vec![0x7f], modifiers, KeyIntent::Backspace),
+            None => bytes(vec![0x7f], KeyIntent::Backspace),
+        },
         KeyCode::BackTab => bytes(b"\x1b[Z".to_vec(), KeyIntent::Nonlinear),
-        KeyCode::Esc => bytes(vec![0x1b], KeyIntent::Nonlinear),
-        KeyCode::Left => bytes(b"\x1b[D".to_vec(), KeyIntent::Nonlinear),
-        KeyCode::Right => bytes(b"\x1b[C".to_vec(), KeyIntent::Nonlinear),
-        KeyCode::Up => bytes(b"\x1b[A".to_vec(), KeyIntent::Nonlinear),
-        KeyCode::Down => bytes(b"\x1b[B".to_vec(), KeyIntent::Nonlinear),
-        KeyCode::Delete => bytes(b"\x1b[3~".to_vec(), KeyIntent::Nonlinear),
-        KeyCode::Insert => bytes(b"\x1b[2~".to_vec(), KeyIntent::Nonlinear),
-        KeyCode::Home => bytes(b"\x1b[H".to_vec(), KeyIntent::Nonlinear),
-        KeyCode::End => bytes(b"\x1b[F".to_vec(), KeyIntent::Nonlinear),
-        KeyCode::PageUp => bytes(b"\x1b[5~".to_vec(), KeyIntent::Nonlinear),
-        KeyCode::PageDown => bytes(b"\x1b[6~".to_vec(), KeyIntent::Nonlinear),
-        KeyCode::F(n) => function_key(n),
+        KeyCode::Esc => {
+            if let Some(sequence) = modified_other_key(27, modifiers) {
+                bytes(sequence, KeyIntent::Nonlinear)
+            } else {
+                bytes(vec![0x1b], KeyIntent::Nonlinear)
+            }
+        }
+        KeyCode::Left => csi_key('D', modifiers),
+        KeyCode::Right => csi_key('C', modifiers),
+        KeyCode::Up => csi_key('A', modifiers),
+        KeyCode::Down => csi_key('B', modifiers),
+        KeyCode::Delete => tilde_key(3, modifiers),
+        KeyCode::Insert => tilde_key(2, modifiers),
+        KeyCode::Home => csi_key('H', modifiers),
+        KeyCode::End => csi_key('F', modifiers),
+        KeyCode::KeypadBegin => csi_key('E', modifiers),
+        KeyCode::PageUp => tilde_key(5, modifiers),
+        KeyCode::PageDown => tilde_key(6, modifiers),
+        KeyCode::F(n) => function_key(n, modifiers),
         KeyCode::Char(ch) if !ch.is_control() => {
             let mut text = Vec::new();
             text.extend(ch.to_string().as_bytes());
-            bytes(text, KeyIntent::Printable(ch))
+            modified_bytes(text, modifiers, KeyIntent::Printable(ch))
         }
         _ => local(KeyIntent::Unsupported),
     };
-
-    if alt && !encoded.bytes.is_empty() {
-        let mut prefixed = Vec::with_capacity(encoded.bytes.len() + 1);
-        prefixed.push(0x1b);
-        prefixed.extend_from_slice(&encoded.bytes);
-        return bytes(prefixed, KeyIntent::Nonlinear);
-    }
 
     encoded
 }
@@ -105,6 +118,58 @@ fn local(intent: KeyIntent) -> EncodedKey {
     }
 }
 
+fn modified_bytes(bytes: Vec<u8>, modifiers: KeyModifiers, intent: KeyIntent) -> EncodedKey {
+    if has_escape_modifier(modifiers) && !bytes.is_empty() {
+        let mut prefixed = Vec::with_capacity(bytes.len() + 1);
+        prefixed.push(0x1b);
+        prefixed.extend_from_slice(&bytes);
+        return EncodedKey {
+            bytes: prefixed,
+            intent: KeyIntent::Nonlinear,
+        };
+    }
+    EncodedKey { bytes, intent }
+}
+
+fn csi_key(final_byte: char, modifiers: KeyModifiers) -> EncodedKey {
+    let sequence = match xterm_modifier(modifiers) {
+        Some(modifier) => format!("\x1b[1;{modifier}{final_byte}"),
+        None => format!("\x1b[{final_byte}"),
+    };
+    bytes(sequence.into_bytes(), KeyIntent::Nonlinear)
+}
+
+fn tilde_key(number: u8, modifiers: KeyModifiers) -> EncodedKey {
+    let sequence = match xterm_modifier(modifiers) {
+        Some(modifier) => format!("\x1b[{number};{modifier}~"),
+        None => format!("\x1b[{number}~"),
+    };
+    bytes(sequence.into_bytes(), KeyIntent::Nonlinear)
+}
+
+fn modified_other_key(codepoint: u8, modifiers: KeyModifiers) -> Option<Vec<u8>> {
+    xterm_modifier(modifiers)
+        .map(|modifier| format!("\x1b[27;{modifier};{codepoint}~").into_bytes())
+}
+
+fn xterm_modifier(modifiers: KeyModifiers) -> Option<u8> {
+    let mut value = 1;
+    if modifiers.contains(KeyModifiers::SHIFT) {
+        value += 1;
+    }
+    if has_escape_modifier(modifiers) {
+        value += 2;
+    }
+    if modifiers.contains(KeyModifiers::CONTROL) {
+        value += 4;
+    }
+    (value > 1).then_some(value)
+}
+
+fn has_escape_modifier(modifiers: KeyModifiers) -> bool {
+    modifiers.intersects(KeyModifiers::ALT | KeyModifiers::META)
+}
+
 fn control_byte(ch: char) -> Option<u8> {
     match ch {
         'a'..='z' => Some(ch as u8 - b'a' + 1),
@@ -123,23 +188,36 @@ fn control_byte(ch: char) -> Option<u8> {
     }
 }
 
-fn function_key(n: u8) -> EncodedKey {
-    let sequence = match n {
-        1 => "\x1bOP",
-        2 => "\x1bOQ",
-        3 => "\x1bOR",
-        4 => "\x1bOS",
-        5 => "\x1b[15~",
-        6 => "\x1b[17~",
-        7 => "\x1b[18~",
-        8 => "\x1b[19~",
-        9 => "\x1b[20~",
-        10 => "\x1b[21~",
-        11 => "\x1b[23~",
-        12 => "\x1b[24~",
-        _ => return local(KeyIntent::Unsupported),
+fn function_key(n: u8, modifiers: KeyModifiers) -> EncodedKey {
+    let (base, effective_modifiers) = if (13..=24).contains(&n) {
+        (n - 12, modifiers | KeyModifiers::SHIFT)
+    } else {
+        (n, modifiers)
     };
-    bytes(sequence.as_bytes().to_vec(), KeyIntent::Nonlinear)
+
+    match base {
+        1 => function_csi_or_ss3('P', effective_modifiers),
+        2 => function_csi_or_ss3('Q', effective_modifiers),
+        3 => function_csi_or_ss3('R', effective_modifiers),
+        4 => function_csi_or_ss3('S', effective_modifiers),
+        5 => tilde_key(15, effective_modifiers),
+        6 => tilde_key(17, effective_modifiers),
+        7 => tilde_key(18, effective_modifiers),
+        8 => tilde_key(19, effective_modifiers),
+        9 => tilde_key(20, effective_modifiers),
+        10 => tilde_key(21, effective_modifiers),
+        11 => tilde_key(23, effective_modifiers),
+        12 => tilde_key(24, effective_modifiers),
+        _ => local(KeyIntent::Unsupported),
+    }
+}
+
+fn function_csi_or_ss3(final_byte: char, modifiers: KeyModifiers) -> EncodedKey {
+    let sequence = match xterm_modifier(modifiers) {
+        Some(modifier) => format!("\x1b[1;{modifier}{final_byte}"),
+        None => format!("\x1bO{final_byte}"),
+    };
+    bytes(sequence.into_bytes(), KeyIntent::Nonlinear)
 }
 
 #[cfg(test)]
@@ -189,6 +267,74 @@ mod tests {
         assert_eq!(
             encode_key(key(KeyCode::Delete, KeyModifiers::NONE)).bytes,
             b"\x1b[3~"
+        );
+    }
+
+    #[test]
+    fn encodes_modified_navigation_keys() {
+        assert_eq!(
+            encode_key(key(KeyCode::Left, KeyModifiers::CONTROL)).bytes,
+            b"\x1b[1;5D"
+        );
+        assert_eq!(
+            encode_key(key(
+                KeyCode::Right,
+                KeyModifiers::SHIFT | KeyModifiers::ALT | KeyModifiers::CONTROL
+            ))
+            .bytes,
+            b"\x1b[1;8C"
+        );
+        assert_eq!(
+            encode_key(key(KeyCode::Delete, KeyModifiers::CONTROL)).bytes,
+            b"\x1b[3;5~"
+        );
+        assert_eq!(
+            encode_key(key(KeyCode::Home, KeyModifiers::ALT)).bytes,
+            b"\x1b[1;3H"
+        );
+        assert_eq!(
+            encode_key(key(KeyCode::KeypadBegin, KeyModifiers::CONTROL)).bytes,
+            b"\x1b[1;5E"
+        );
+    }
+
+    #[test]
+    fn encodes_modified_function_keys() {
+        assert_eq!(
+            encode_key(key(KeyCode::F(1), KeyModifiers::NONE)).bytes,
+            b"\x1bOP"
+        );
+        assert_eq!(
+            encode_key(key(KeyCode::F(1), KeyModifiers::CONTROL)).bytes,
+            b"\x1b[1;5P"
+        );
+        assert_eq!(
+            encode_key(key(KeyCode::F(5), KeyModifiers::ALT)).bytes,
+            b"\x1b[15;3~"
+        );
+        assert_eq!(
+            encode_key(key(KeyCode::F(13), KeyModifiers::NONE)).bytes,
+            b"\x1b[1;2P"
+        );
+    }
+
+    #[test]
+    fn preserves_alt_modified_text_and_controls() {
+        assert_eq!(
+            encode_key(key(KeyCode::Char('x'), KeyModifiers::ALT)).bytes,
+            b"\x1bx"
+        );
+        assert_eq!(
+            encode_key(key(
+                KeyCode::Char('c'),
+                KeyModifiers::ALT | KeyModifiers::CONTROL
+            ))
+            .bytes,
+            &[0x1b, 0x03]
+        );
+        assert_eq!(
+            encode_key(key(KeyCode::Enter, KeyModifiers::CONTROL)).bytes,
+            b"\x1b[27;5;13~"
         );
     }
 

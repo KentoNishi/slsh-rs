@@ -69,6 +69,8 @@ def main() -> int:
             "red sgr output": b"\x1b[31mred" in output,
             "256-color sgr output": b"\x1b[38;5;196mhot" in output,
             "dec special graphics output": dec_graphics_seen(output),
+            "alternate screen exit reset style": alternate_exit_reset_seen(output),
+            "alternate screen exit preserved scrollback": not alternate_exit_repaint_seen(output),
         }
 
     failed = [name for name, ok in checks.items() if not ok]
@@ -224,6 +226,12 @@ def run_slsh(port: int, client_key: str, known_hosts: str) -> bytes:
                 and b"\x1b[38;5;196mhot" in output
                 and dec_graphics_seen(output)
             ):
+                os.write(
+                    fd,
+                    b"printf '\\033[?1049h\\033[42m\\033[2JALT\\033[?1049l\\n'\r",
+                )
+                stage = "wait_alternate"
+            elif stage == "wait_alternate" and alternate_exit_reset_seen(output):
                 os.write(fd, b"exit\r")
                 return output
     finally:
@@ -245,6 +253,20 @@ def dec_graphics_seen(output: bytes) -> bool:
         or b"\x1b(0lqk\x1b(B" in output
         or b"\x1b)0\x0elqk\x0f" in output
     )
+
+
+def alternate_exit_repaint_seen(output: bytes) -> bool:
+    exit_index = output.rfind(b"\x1b[?1049l")
+    if exit_index < 0:
+        return False
+    return b"\x1b[2J" in output[exit_index:]
+
+
+def alternate_exit_reset_seen(output: bytes) -> bool:
+    exit_index = output.rfind(b"\x1b[?1049l")
+    if exit_index < 0:
+        return False
+    return b"\x1b[0m" in output[exit_index:]
 
 
 if __name__ == "__main__":

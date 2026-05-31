@@ -15,7 +15,7 @@ use crossterm::terminal;
 use input::InputEvent;
 use predict::BasePredictor;
 use render::Renderer;
-use screen::{Screen, Size};
+use screen::{ActiveBuffer, Screen, Size};
 use ssh_args::{LaunchMode, ParsedSshArgs};
 use std::collections::HashSet;
 use std::env;
@@ -80,9 +80,26 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
         let mut dirty = false;
 
         for chunk in transport.drain_chunks() {
+            let before_active = screen.active();
             screen.feed(&mut parser, &chunk);
             predictor.reconcile(&screen);
-            if raw_synced && predictor.overlay.cells.is_empty() {
+            let left_alternate = (before_active == ActiveBuffer::Alternate
+                && screen.active() == ActiveBuffer::Primary)
+                || contains_alternate_exit(&chunk);
+            if left_alternate {
+                stdout
+                    .write_all(&chunk)
+                    .context("failed to render ssh output")?;
+                stdout
+                    .write_all(b"\x1b[0m")
+                    .context("failed to reset terminal style")?;
+                stdout.flush().context("failed to flush ssh output")?;
+                predictor.clear();
+                screen.reset_style();
+                renderer.sync_to_terminal(&screen, &predictor.overlay);
+                raw_synced = true;
+                dirty = false;
+            } else if raw_synced && predictor.overlay.cells.is_empty() {
                 stdout
                     .write_all(&chunk)
                     .context("failed to render ssh output")?;
@@ -183,6 +200,16 @@ fn key_fingerprint(key: KeyEvent) -> String {
     format!("{modifiers:?}:{code}")
 }
 
+fn contains_alternate_exit(bytes: &[u8]) -> bool {
+    [b"\x1b[?47l".as_slice(), b"\x1b[?1047l", b"\x1b[?1049l"]
+        .iter()
+        .any(|pattern| {
+            bytes
+                .windows(pattern.len())
+                .any(|window| window == *pattern)
+        })
+}
+
 struct TerminalGuard;
 
 impl TerminalGuard {
@@ -215,7 +242,12 @@ impl KeyTrace {
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        let _ = execute!(io::stdout(), ResetColor, Show);
+        let _ = execute!(
+            io::stdout(),
+            crossterm::style::Print("\x1b[0m\x1b[?1049l"),
+            ResetColor,
+            Show
+        );
         let _ = terminal::disable_raw_mode();
     }
 }
@@ -242,5 +274,13 @@ mod tests {
             compositor_ssh_args(&parsed),
             vec!["-tt", "-p", "2222", "host", "bash", "-l"]
         );
+    }
+
+    #[test]
+    fn detects_alternate_screen_exit_in_chunk() {
+        assert!(contains_alternate_exit(b"\x1b[?1049l"));
+        assert!(contains_alternate_exit(b"abc\x1b[?1047ldef"));
+        assert!(contains_alternate_exit(b"\x1b[?47l"));
+        assert!(!contains_alternate_exit(b"\x1b[?1049h"));
     }
 }
