@@ -106,7 +106,16 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
                             screen.feed(&mut parser, &bytes);
                             predictor.reconcile(&screen);
                             bootstrap.note_raw();
-                            dirty = true;
+                            if bootstrap.preserve_raw_terminal() {
+                                let bytes = bootstrap.completed_raw_terminal_bytes(&bytes);
+                                stdout
+                                    .write_all(&bytes)
+                                    .context("failed to render login output")?;
+                                stdout.flush().context("failed to flush login output")?;
+                                renderer.sync_to_terminal(&screen, &predictor.overlay);
+                            } else {
+                                dirty = true;
+                            }
                         }
                     }
                     StreamEvent::Control(ControlEvent::Output { pane, bytes }) => {
@@ -236,6 +245,7 @@ struct LoginBootstrap {
     sent: bool,
     suppress_raw: bool,
     handoff: Option<Cursor>,
+    raw_terminal_buffer: Vec<u8>,
 }
 
 impl LoginBootstrap {
@@ -247,11 +257,28 @@ impl LoginBootstrap {
             sent: false,
             suppress_raw: false,
             handoff: None,
+            raw_terminal_buffer: Vec::new(),
         }
     }
 
     fn accept_raw(&self) -> bool {
         !self.suppress_raw
+    }
+
+    fn preserve_raw_terminal(&self) -> bool {
+        self.launcher.is_some() && !self.sent
+    }
+
+    fn completed_raw_terminal_bytes(&mut self, bytes: &[u8]) -> Vec<u8> {
+        self.raw_terminal_buffer.extend_from_slice(bytes);
+        let Some(index) = self
+            .raw_terminal_buffer
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+        else {
+            return Vec::new();
+        };
+        self.raw_terminal_buffer.drain(..=index).collect()
     }
 
     fn note_raw(&mut self) {
@@ -294,6 +321,7 @@ impl LoginBootstrap {
             row: cursor.row,
             col: 0,
         });
+        self.raw_terminal_buffer.clear();
         Some(format!("exec {launcher}\n"))
     }
 
@@ -361,8 +389,7 @@ impl TerminalGuard {
         let _ = crossterm::ansi_support::supports_ansi();
 
         terminal::enable_raw_mode().context("failed to enable raw mode")?;
-        execute!(io::stdout(), Print("\x1b[?7l\x1b[?25l\x1b[2J\x1b[H"))
-            .context("failed to prepare terminal")?;
+        execute!(io::stdout(), Print("\x1b[?7l\x1b[?25l")).context("failed to prepare terminal")?;
         Ok(Self)
     }
 }
@@ -422,6 +449,7 @@ mod tests {
             sent: false,
             suppress_raw: false,
             handoff: None,
+            raw_terminal_buffer: Vec::new(),
         };
 
         assert!(!bootstrap.ready_at(&screen, start + Duration::from_secs(1)));
@@ -440,6 +468,7 @@ mod tests {
             sent: false,
             suppress_raw: false,
             handoff: None,
+            raw_terminal_buffer: Vec::new(),
         };
 
         assert!(bootstrap.ready_at(&screen, start + Duration::from_millis(50)));
@@ -468,5 +497,16 @@ mod tests {
         assert_eq!(trim_handoff_newline(b"\nprompt"), b"prompt");
         assert_eq!(trim_handoff_newline(b"\rprompt"), b"prompt");
         assert_eq!(trim_handoff_newline(b"prompt"), b"prompt");
+    }
+
+    #[test]
+    fn bootstrap_preserves_complete_login_lines_but_holds_prompt() {
+        let mut bootstrap = LoginBootstrap::new(Some("tmux -CC new-session -s test".into()));
+
+        assert_eq!(
+            bootstrap.completed_raw_terminal_bytes(b"Welcome\r\nbash-5.0# "),
+            b"Welcome\r\n"
+        );
+        assert_eq!(bootstrap.completed_raw_terminal_bytes(b""), b"");
     }
 }

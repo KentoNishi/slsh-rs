@@ -26,6 +26,11 @@ impl Renderer {
         self.force_full = true;
     }
 
+    pub fn sync_to_terminal(&mut self, screen: &Screen, overlay: &Overlay) {
+        self.last = Some(compose_frame(screen, overlay));
+        self.force_full = false;
+    }
+
     pub fn render(&mut self, screen: &Screen, overlay: &Overlay) -> String {
         let next = compose_frame(screen, overlay);
         let output =
@@ -338,5 +343,24 @@ mod tests {
 
         let next = renderer.render(&screen, &overlay);
         assert!(!next.contains("\x1b[2J"));
+    }
+
+    #[test]
+    fn synced_terminal_uses_diff_without_full_draw() {
+        let first = screen_with(b"hi");
+        let second = screen_with(b"ho");
+        let overlay = Overlay {
+            enabled: true,
+            cells: Vec::new(),
+            cursor: None,
+        };
+        let mut renderer = Renderer::new();
+
+        renderer.sync_to_terminal(&first, &overlay);
+        let out = renderer.render(&second, &overlay);
+
+        assert!(!out.contains("\x1b[2J"));
+        assert!(out.contains("\x1b[1;2H"));
+        assert!(out.contains('o'));
     }
 }
