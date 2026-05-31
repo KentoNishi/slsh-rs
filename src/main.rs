@@ -69,7 +69,11 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
     let mut parser = vte::Parser::new();
     let mut predictor = BasePredictor::new(parsed.slsh.predict);
     let mut renderer = Renderer::new();
-    let mut transport = Transport::spawn(&ssh_args, cols.max(1), rows.max(1))?;
+    let mut transport = if Transport::loopback_enabled() {
+        Transport::spawn_loopback(&parsed.remote_command, cols.max(1), rows.max(1))?
+    } else {
+        Transport::spawn_ssh(&ssh_args, cols.max(1), rows.max(1))?
+    };
     let _terminal = TerminalGuard::enter()?;
     let mut stdout = io::stdout();
     let mut key_trace = KeyTrace::from_env();
