@@ -101,6 +101,7 @@ class WindowsTerminalSmoke
                 CtrlLeft();
                 CtrlRight();
                 CtrlDelete();
+                CtrlX();
                 Enter();
                 CtrlD();
                 RequireRemoteFile(ssh, host, keyMarker, 40, "modified key marker");
@@ -157,6 +158,11 @@ class WindowsTerminalSmoke
     static void CtrlD()
     {
         Key(0x44, 0x20, '\x04', LEFT_CTRL_PRESSED);
+    }
+
+    static void CtrlX()
+    {
+        Key(0x58, 0x2D, '\x18', LEFT_CTRL_PRESSED);
     }
 
     static void CtrlLeft()
@@ -218,7 +224,7 @@ class WindowsTerminalSmoke
 
     static void RequireRemoteModifiedKeyBytes(string ssh, string host, string path)
     {
-        string command = "python3 -c \"import pathlib,sys; data=pathlib.Path('" + path + "').read_bytes(); esc=bytes([27]); expected=esc+b'[1;5D'+esc+b'[1;5C'+esc+b'[3;5~'; sys.exit(0 if expected in data else 1)\"";
+        string command = "python3 -c \"import pathlib,sys; data=pathlib.Path('" + path + "').read_bytes(); esc=bytes([27]); expected=esc+b'[1;5D'+esc+b'[1;5C'+esc+b'[3;5~'+bytes([24]); sys.exit(0 if expected in data else 1)\"";
         if (Run(ssh, SshArgs(host, command)) != 0)
             throw new InvalidOperationException("modified key bytes missing from " + path);
     }

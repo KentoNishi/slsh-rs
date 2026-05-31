@@ -54,6 +54,7 @@ def main() -> int:
         "enter key forwarded": b"\r" in ssh_input,
         "backspace key forwarded": b"\x7f" in ssh_input,
         "ctrl-c forwarded": b"\x03" in ssh_input,
+        "ctrl-x forwarded": b"\x18" in ssh_input,
         "left key forwarded": b"\x1b[D" in ssh_input,
         "ctrl-left key forwarded": b"\x1b[1;5D" in ssh_input,
         "ctrl-right key forwarded": b"\x1b[1;5C" in ssh_input,
@@ -156,7 +157,7 @@ def run_slsh(env: dict[str, str]) -> bytes:
                 output += chunk
 
             if stage == "wait_prompt" and prompt_seen(output):
-                os.write(fd, b"xy\x7f\x1b[D\x1b[1;5D\x1b[1;5C\x1b[3;5~\x03")
+                os.write(fd, b"xy\x7f\x1b[D\x1b[1;5D\x1b[1;5C\x1b[3;5~\x18\x03")
                 stage = "sent_shortcuts"
                 stage_at = time.time()
             elif stage == "sent_shortcuts" and time.time() - stage_at > 0.25:
