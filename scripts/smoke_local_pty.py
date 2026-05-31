@@ -30,6 +30,7 @@ def main() -> int:
         env["PATH"] = f"{tmp}{os.pathsep}{env['PATH']}"
         env["FAKE_SSH_LOG"] = fake_ssh_log
         env["FAKE_SSH_SLOW_LOGIN"] = "1"
+        env["SLSH_DELAY_MS"] = "1"
 
         startup_output = run_startup_slsh(env)
         output = run_slsh(env)
