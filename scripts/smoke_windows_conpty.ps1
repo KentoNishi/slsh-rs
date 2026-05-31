@@ -2,7 +2,8 @@ param(
     [string]$SlshExe = "",
     [string]$HostName = "wsl",
     [switch]$SelfTest,
-    [switch]$NanoRow
+    [switch]$NanoRow,
+    [string]$NestedLinuxSlsh = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -25,6 +26,11 @@ if ($LASTEXITCODE -ne 0) {
 
 if ($SelfTest) {
     & $exe --self-test
+    exit $LASTEXITCODE
+}
+
+if ($NestedLinuxSlsh) {
+    & $exe --nested-linux-nano-row $NestedLinuxSlsh $HostName
     exit $LASTEXITCODE
 }
 

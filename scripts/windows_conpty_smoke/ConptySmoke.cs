@@ -101,14 +101,19 @@ class ConptySmoke
         bool selfTest = args.Length > 0 && args[0] == "--self-test";
         bool startupDump = args.Length > 0 && args[0] == "--startup-dump";
         bool nanoRow = args.Length > 0 && args[0] == "--nano-row";
-        int argOffset = startupDump || nanoRow ? 1 : 0;
+        bool nestedLinuxNanoRow = args.Length > 0 && args[0] == "--nested-linux-nano-row";
+        int argOffset = startupDump || nanoRow || nestedLinuxNanoRow ? 1 : 0;
         string exe = selfTest ? Environment.GetEnvironmentVariable("COMSPEC") : (args.Length > 0 ? args[argOffset] : "slsh.exe");
         string host = args.Length > argOffset + 1 ? args[argOffset + 1] : "wsl";
         string stamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString();
         string commandLine = selfTest
             ? Quote(exe) + " /k"
-            : Quote(exe) + " " + host + (nanoRow ? " nano /tmp/slsh-nano-row-" + stamp + ".txt" : "");
-        string workdir = Path.GetDirectoryName(exe);
+            : nestedLinuxNanoRow
+                ? Quote(@"C:\Windows\System32\OpenSSH\ssh.exe") + " -tt " + host + " " + Quote("cd " + ShellQuote(DirectoryNameForShell(exe)) + " && SLSH_LOOPBACK=1 SLSH_DELAY_MS=1000 SLSH_KEY_LOG=/tmp/slsh-nested-keys-" + stamp + ".log " + ShellQuote(exe) + " ignored-host nano /tmp/slsh-nested-nano-row-" + stamp + ".txt")
+                : Quote(exe) + " " + host + (nanoRow ? " nano /tmp/slsh-nano-row-" + stamp + ".txt" : "");
+        string workdir = nestedLinuxNanoRow
+            ? Environment.SystemDirectory
+            : Path.GetDirectoryName(exe);
         string marker = selfTest ? "CONPTYSELFOK" : "SLSHCONPTYOK";
         string inputText = selfTest
             ? "echo CONPTYSELFOK\r"
@@ -187,7 +192,7 @@ class ConptySmoke
         reader.IsBackground = true;
         reader.Start();
 
-        if (nanoRow)
+        if (nanoRow || nestedLinuxNanoRow)
             return RunNanoRowSmoke(input, seen, pi, attrList, hpc, logPath);
 
         while (DateTime.UtcNow < deadline)
@@ -394,6 +399,18 @@ class ConptySmoke
     }
 
     static string Quote(string value) { return "\"" + value.Replace("\"", "\\\"") + "\""; }
+
+    static string DirectoryNameForShell(string path)
+    {
+        string directory = Path.GetDirectoryName(path);
+        if (string.IsNullOrEmpty(directory)) return ".";
+        return directory.Replace('\\', '/');
+    }
+
+    static string ShellQuote(string value)
+    {
+        return "'" + value.Replace("'", "'\\''") + "'";
+    }
 
     static void Write(Stream stream, string text)
     {
