@@ -158,6 +158,9 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
                 Some(InputEvent::Resize(cols, rows)) => {
                     let cols = cols.max(1);
                     let rows = rows.max(1);
+                    if screen.size() == (Size { cols, rows }) {
+                        continue;
+                    }
                     screen.resize(Size { cols, rows });
                     transport.resize(cols, rows)?;
                     renderer.invalidate();
@@ -449,6 +452,12 @@ mod tests {
         assert!(contains_terminal_mode_change(b"\x1b[?1h"));
         assert!(contains_terminal_mode_change(b"\x1b[?1l"));
         assert!(!contains_terminal_mode_change(b"\x1b[31mred"));
+    }
+
+    #[test]
+    fn sizes_compare_exactly() {
+        assert_eq!(Size { cols: 80, rows: 24 }, Size { cols: 80, rows: 24 });
+        assert_ne!(Size { cols: 80, rows: 24 }, Size { cols: 81, rows: 24 });
     }
 
     #[cfg(unix)]

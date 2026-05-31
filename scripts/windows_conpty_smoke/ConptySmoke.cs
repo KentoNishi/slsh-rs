@@ -100,8 +100,14 @@ class ConptySmoke
     {
         bool selfTest = args.Length > 0 && args[0] == "--self-test";
         bool startupDump = args.Length > 0 && args[0] == "--startup-dump";
-        string exe = selfTest ? Environment.GetEnvironmentVariable("COMSPEC") : (args.Length > 0 ? args[startupDump ? 1 : 0] : "slsh.exe");
-        string commandLine = selfTest ? Quote(exe) + " /k" : Quote(exe) + " " + (args.Length > (startupDump ? 2 : 1) ? args[startupDump ? 2 : 1] : "wsl");
+        bool nanoRow = args.Length > 0 && args[0] == "--nano-row";
+        int argOffset = startupDump || nanoRow ? 1 : 0;
+        string exe = selfTest ? Environment.GetEnvironmentVariable("COMSPEC") : (args.Length > 0 ? args[argOffset] : "slsh.exe");
+        string host = args.Length > argOffset + 1 ? args[argOffset + 1] : "wsl";
+        string stamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString();
+        string commandLine = selfTest
+            ? Quote(exe) + " /k"
+            : Quote(exe) + " " + host + (nanoRow ? " nano /tmp/slsh-nano-row-" + stamp + ".txt" : "");
         string workdir = Path.GetDirectoryName(exe);
         string marker = selfTest ? "CONPTYSELFOK" : "SLSHCONPTYOK";
         string inputText = selfTest
@@ -135,7 +141,11 @@ class ConptySmoke
         si.lpAttributeList = attrList;
 
         PROCESS_INFORMATION pi;
-        string envBlock = BuildEnvironmentBlock("SLSH_KEY_LOG", logPath);
+        string envBlock = BuildEnvironmentBlock(
+            new string[,] {
+                { "SLSH_KEY_LOG", logPath },
+                { "SLSH_DELAY_MS", nanoRow ? "1000" : "" },
+            });
         IntPtr env = Marshal.StringToHGlobalUni(envBlock);
         bool started = CreateProcessW(
             null,
@@ -176,6 +186,9 @@ class ConptySmoke
         });
         reader.IsBackground = true;
         reader.Start();
+
+        if (nanoRow)
+            return RunNanoRowSmoke(input, seen, pi, attrList, hpc, logPath);
 
         while (DateTime.UtcNow < deadline)
         {
@@ -288,16 +301,94 @@ class ConptySmoke
         ClosePseudoConsole(hpc);
     }
 
-    static string BuildEnvironmentBlock(string name, string value)
+    static int RunNanoRowSmoke(
+        Stream input,
+        StringBuilder seen,
+        PROCESS_INFORMATION pi,
+        IntPtr attrList,
+        IntPtr hpc,
+        string logPath)
+    {
+        DateTime deadline = DateTime.UtcNow.AddSeconds(25);
+        int probeStart = -1;
+        DateTime? sentAt = null;
+
+        while (DateTime.UtcNow < deadline)
+        {
+            string text;
+            lock (seen) text = seen.ToString();
+
+            if (probeStart < 0
+                && text.Contains("GNU nano")
+                && text.Contains("Exit")
+                && (text.Contains("\x1b[2d") || text.Contains("\x1b[2;1H")))
+            {
+                probeStart = text.Length;
+                Write(input, "Z");
+                sentAt = DateTime.UtcNow;
+            }
+
+            if (sentAt.HasValue && DateTime.UtcNow - sentAt.Value >= TimeSpan.FromMilliseconds(1200))
+            {
+                lock (seen) text = seen.ToString();
+                string slice = text.Substring(Math.Min(probeStart, text.Length));
+                Write(input, "\x18n");
+                if (slice.Contains("Z") && slice.Contains("\x1b[2;1H"))
+                {
+                    TerminateProcess(pi.hProcess, 0);
+                    Cleanup(pi, attrList, hpc);
+                    Console.WriteLine("windows ConPTY nano row smoke passed");
+                    if (File.Exists(logPath)) Console.WriteLine(ReadShared(logPath));
+                    return 0;
+                }
+
+                TerminateProcess(pi.hProcess, 1);
+                Console.Error.WriteLine("windows ConPTY nano row smoke failed");
+                Console.Error.WriteLine("Slice:");
+                Console.Error.WriteLine(slice.Replace("\x1b", "<ESC>"));
+                Console.Error.WriteLine("Captured:");
+                Console.Error.WriteLine(text.Replace("\x1b", "<ESC>"));
+                if (File.Exists(logPath))
+                {
+                    Console.Error.WriteLine("Key log:");
+                    Console.Error.WriteLine(ReadShared(logPath));
+                }
+                Cleanup(pi, attrList, hpc);
+                return 1;
+            }
+            Thread.Sleep(50);
+        }
+
+        TerminateProcess(pi.hProcess, 1);
+        Console.Error.WriteLine("windows ConPTY nano row smoke timed out");
+        lock (seen) Console.Error.WriteLine(seen.ToString().Replace("\x1b", "<ESC>"));
+        Cleanup(pi, attrList, hpc);
+        return 1;
+    }
+
+    static string BuildEnvironmentBlock(string[,] overrides)
     {
         var env = Environment.GetEnvironmentVariables();
         var pairs = new System.Collections.Generic.List<string>();
         foreach (System.Collections.DictionaryEntry entry in env)
         {
-            if (!string.Equals((string)entry.Key, name, StringComparison.OrdinalIgnoreCase))
+            bool replaced = false;
+            for (int i = 0; i < overrides.GetLength(0); i++)
+            {
+                if (!string.IsNullOrEmpty(overrides[i, 1]) && string.Equals((string)entry.Key, overrides[i, 0], StringComparison.OrdinalIgnoreCase))
+                {
+                    replaced = true;
+                    break;
+                }
+            }
+            if (!replaced)
                 pairs.Add((string)entry.Key + "=" + (string)entry.Value);
         }
-        pairs.Add(name + "=" + value);
+        for (int i = 0; i < overrides.GetLength(0); i++)
+        {
+            if (!string.IsNullOrEmpty(overrides[i, 1]))
+                pairs.Add(overrides[i, 0] + "=" + overrides[i, 1]);
+        }
         pairs.Sort(StringComparer.OrdinalIgnoreCase);
         return string.Join("\0", pairs.ToArray()) + "\0\0";
     }

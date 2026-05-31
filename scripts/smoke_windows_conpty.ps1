@@ -1,7 +1,8 @@
 param(
     [string]$SlshExe = "",
     [string]$HostName = "wsl",
-    [switch]$SelfTest
+    [switch]$SelfTest,
+    [switch]$NanoRow
 )
 
 $ErrorActionPreference = "Stop"
@@ -33,6 +34,11 @@ if (!$SlshExe) {
 
 if (!(Test-Path $SlshExe)) {
     throw "missing slsh.exe: $SlshExe"
+}
+
+if ($NanoRow) {
+    & $exe --nano-row $SlshExe $HostName
+    exit $LASTEXITCODE
 }
 
 & $exe $SlshExe $HostName
