@@ -273,7 +273,8 @@ impl BasePredictor {
         let cursor = screen.cursor();
         let at_overlay_cursor = self.overlay.cursor == Some(cursor);
         let at_pending_cell = self.overlay.cells.iter().any(|cell| cell.pos == cursor);
-        if !at_overlay_cursor && !at_pending_cell {
+        let still_redrawing_overlay_rows = cursor_on_overlay_rows(cursor, &self.overlay.cells);
+        if !at_overlay_cursor && !at_pending_cell && !still_redrawing_overlay_rows {
             self.clear();
         }
     }
@@ -326,7 +327,16 @@ fn remote_cursor_accepts_suffix(
     overlay_cursor: Option<Cursor>,
 ) -> bool {
     let cursor = screen.cursor();
-    overlay_cursor == Some(cursor) || suffix.iter().any(|cell| cell.pos == cursor)
+    overlay_cursor == Some(cursor)
+        || suffix.iter().any(|cell| cell.pos == cursor)
+        || cursor_on_overlay_rows(cursor, suffix)
+}
+
+fn cursor_on_overlay_rows(cursor: Cursor, cells: &[OverlayCell]) -> bool {
+    let (Some(first), Some(last)) = (cells.first(), cells.last()) else {
+        return false;
+    };
+    (first.pos.row..=last.pos.row).contains(&cursor.row)
 }
 
 pub fn hidden_input_guard(screen: &Screen) -> bool {
@@ -550,6 +560,28 @@ mod tests {
     }
 
     #[test]
+    fn conflicting_prefix_keeps_suffix_during_same_line_redraw() {
+        let mut screen = screen_with(b"$ ");
+        let mut predictor = BasePredictor::new(true);
+
+        for ch in "abcdef".chars() {
+            predictor.on_key(KeyIntent::Printable(ch), &screen);
+        }
+        feed(&mut screen, b"abcX\r");
+        predictor.reconcile(&screen);
+
+        assert_eq!(
+            predictor
+                .overlay
+                .cells
+                .iter()
+                .map(|cell| cell.cell.ch)
+                .collect::<String>(),
+            "ef"
+        );
+    }
+
+    #[test]
     fn conflicting_prefix_clears_suffix_after_remote_cursor_jump() {
         let mut screen = screen_with(b"$ ");
         let mut predictor = BasePredictor::new(true);
@@ -584,6 +616,28 @@ mod tests {
         predictor.reconcile(&screen);
 
         assert!(predictor.overlay.cells.is_empty());
+    }
+
+    #[test]
+    fn same_line_cursor_redraw_keeps_unconfirmed_overlay() {
+        let mut screen = screen_with(b"$ ");
+        let mut predictor = BasePredictor::new(true);
+
+        for ch in "abcdef".chars() {
+            predictor.on_key(KeyIntent::Printable(ch), &screen);
+        }
+        feed(&mut screen, b"\r");
+        predictor.reconcile(&screen);
+
+        assert_eq!(
+            predictor
+                .overlay
+                .cells
+                .iter()
+                .map(|cell| cell.cell.ch)
+                .collect::<String>(),
+            "abcdef"
+        );
     }
 
     #[test]
