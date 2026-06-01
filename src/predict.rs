@@ -221,14 +221,17 @@ impl BasePredictor {
             return;
         }
 
+        let under = screen.cell(target);
         if !self.remove_owned(target) {
-            if self.overlay.cells.is_empty() {
-                self.clear();
-            }
-            return;
+            let Some(start) = confirmed_deletion_start(target, screen) else {
+                if self.overlay.cells.is_empty() {
+                    self.clear();
+                }
+                return;
+            };
+            self.edit_anchor.get_or_insert(start);
         }
 
-        let under = screen.cell(target);
         if under.ch != ' ' {
             self.overlay.cells.push(OverlayCell {
                 pos: target,
@@ -533,6 +536,46 @@ fn command_submit_context(screen: &Screen) -> bool {
         && !screen.content_below_cursor()
 }
 
+fn confirmed_deletion_start(target: Cursor, screen: &Screen) -> Option<Cursor> {
+    let start = command_start_before_cursor(screen)?;
+    (cursor_index(target, screen) >= cursor_index(start, screen)).then_some(start)
+}
+
+fn command_start_before_cursor(screen: &Screen) -> Option<Cursor> {
+    if !command_submit_context(screen) {
+        return None;
+    }
+
+    let cursor = screen.cursor();
+    let mut prompt_end = None;
+    for col in 0..cursor.col {
+        let ch = screen.cell(Cursor {
+            row: cursor.row,
+            col,
+        });
+        if matches!(ch.ch, '$' | '#' | '>' | '%') {
+            prompt_end = Some(col.saturating_add(1));
+        }
+    }
+
+    let mut col = prompt_end?;
+    while col < cursor.col
+        && screen
+            .cell(Cursor {
+                row: cursor.row,
+                col,
+            })
+            .ch
+            == ' '
+    {
+        col += 1;
+    }
+    Some(Cursor {
+        row: cursor.row,
+        col,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -604,6 +647,80 @@ mod tests {
         let mut predictor = BasePredictor::new(true);
 
         predictor.on_key(KeyIntent::Backspace, &screen);
+
+        assert!(predictor.overlay.cells.is_empty());
+        assert_eq!(predictor.overlay.cursor, None);
+    }
+
+    #[test]
+    fn backspace_does_not_hide_nonspace_prompt_cell() {
+        let screen = screen_with(b"$");
+        let mut predictor = BasePredictor::new(true);
+
+        predictor.on_key(KeyIntent::Backspace, &screen);
+
+        assert!(predictor.overlay.cells.is_empty());
+        assert_eq!(predictor.overlay.cursor, None);
+    }
+
+    #[test]
+    fn backspace_marks_unowned_confirmed_command_text_for_deletion() {
+        let screen = screen_with(b"$ echo");
+        let mut predictor = BasePredictor::new(true);
+
+        predictor.on_key(KeyIntent::Backspace, &screen);
+
+        assert_eq!(predictor.overlay.cells.len(), 1);
+        assert_eq!(predictor.overlay.cells[0].pos, Cursor { row: 0, col: 5 });
+        assert_eq!(predictor.overlay.cells[0].cell.ch, 'o');
+        assert_eq!(
+            predictor.overlay.cells[0].kind,
+            OverlayKind::Deletion { remote_seen: true }
+        );
+        assert_eq!(predictor.overlay.cursor, Some(Cursor { row: 0, col: 5 }));
+    }
+
+    #[test]
+    fn repeated_backspace_marks_unowned_confirmed_command_text_in_order() {
+        let screen = screen_with(b"$ abc");
+        let mut predictor = BasePredictor::new(true);
+
+        predictor.on_key(KeyIntent::Backspace, &screen);
+        predictor.on_key(KeyIntent::Backspace, &screen);
+
+        assert_eq!(
+            predictor
+                .overlay
+                .cells
+                .iter()
+                .map(|cell| (cell.pos.col, cell.cell.ch))
+                .collect::<Vec<_>>(),
+            vec![(4, 'c'), (3, 'b')]
+        );
+        assert_eq!(predictor.overlay.cursor, Some(Cursor { row: 0, col: 3 }));
+    }
+
+    #[test]
+    fn backspace_moves_early_over_unowned_command_space() {
+        let screen = screen_with(b"$ a b");
+        let mut predictor = BasePredictor::new(true);
+
+        predictor.on_key(KeyIntent::Backspace, &screen);
+        predictor.on_key(KeyIntent::Backspace, &screen);
+
+        assert_eq!(predictor.overlay.cells.len(), 1);
+        assert_eq!(predictor.overlay.cells[0].cell.ch, 'b');
+        assert_eq!(predictor.overlay.cursor, Some(Cursor { row: 0, col: 3 }));
+    }
+
+    #[test]
+    fn unowned_confirmed_deletion_clears_after_remote_erase() {
+        let mut screen = screen_with(b"$ abc");
+        let mut predictor = BasePredictor::new(true);
+
+        predictor.on_key(KeyIntent::Backspace, &screen);
+        feed(&mut screen, b"\x08 \x08");
+        predictor.reconcile(&screen);
 
         assert!(predictor.overlay.cells.is_empty());
         assert_eq!(predictor.overlay.cursor, None);
