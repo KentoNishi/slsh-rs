@@ -29,13 +29,19 @@ pub struct BasePredictor {
     owned: Vec<OwnedCell>,
     edit_anchor: Option<Cursor>,
     submitted: bool,
-    blocked_after_nonlinear: bool,
+    nonlinear_block: Option<NonlinearBlock>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct OwnedCell {
     pos: Cursor,
     cell: Cell,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NonlinearBlock {
+    unsettled: Vec<OwnedCell>,
+    expected_cursor: Option<Cursor>,
 }
 
 impl BasePredictor {
@@ -49,7 +55,7 @@ impl BasePredictor {
             owned: Vec::new(),
             edit_anchor: None,
             submitted: false,
-            blocked_after_nonlinear: false,
+            nonlinear_block: None,
         }
     }
 
@@ -64,7 +70,7 @@ impl BasePredictor {
         self.owned.clear();
         self.edit_anchor = None;
         self.submitted = false;
-        self.blocked_after_nonlinear = false;
+        self.nonlinear_block = None;
     }
 
     pub fn on_key(&mut self, intent: KeyIntent, screen: &Screen) {
@@ -73,12 +79,12 @@ impl BasePredictor {
             KeyIntent::Backspace => self.predict_backspace(screen),
             KeyIntent::Submit => self.submit(screen),
             KeyIntent::TogglePrediction => self.toggle(),
-            KeyIntent::Nonlinear | KeyIntent::Unsupported => self.block_until_remote_output(),
+            KeyIntent::Nonlinear | KeyIntent::Unsupported => self.block_until_remote_output(screen),
         }
     }
 
     pub fn reconcile(&mut self, screen: &Screen) {
-        self.blocked_after_nonlinear = false;
+        self.update_nonlinear_block(screen);
         let mut kept = Vec::new();
         let mut conflict = None;
 
@@ -129,7 +135,7 @@ impl BasePredictor {
     }
 
     fn predict_printable(&mut self, ch: char, screen: &Screen) {
-        if self.submitted || self.blocked_after_nonlinear {
+        if self.submitted || self.nonlinear_block.is_some() {
             return;
         }
         if !self.overlay.enabled || hidden_input_guard(screen) {
@@ -187,7 +193,7 @@ impl BasePredictor {
     }
 
     fn predict_backspace(&mut self, screen: &Screen) {
-        if self.submitted || self.blocked_after_nonlinear {
+        if self.submitted || self.nonlinear_block.is_some() {
             return;
         }
         if !self.overlay.enabled || hidden_input_guard(screen) {
@@ -248,7 +254,7 @@ impl BasePredictor {
 
     fn submit(&mut self, screen: &Screen) {
         if !command_submit_context(screen) {
-            self.block_until_remote_output();
+            self.block_until_remote_output(screen);
             return;
         }
         if !self.overlay.cells.is_empty() || !self.owned.is_empty() {
@@ -256,9 +262,23 @@ impl BasePredictor {
         }
     }
 
-    fn block_until_remote_output(&mut self) {
+    fn block_until_remote_output(&mut self, screen: &Screen) {
+        let unsettled = if command_submit_context(screen) {
+            self.owned
+                .iter()
+                .filter(|owned| !owned_confirmed(**owned, screen))
+                .copied()
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let expected_cursor = (!unsettled.is_empty()).then(|| self.expected_cursor(screen));
+        let block = NonlinearBlock {
+            unsettled,
+            expected_cursor,
+        };
         self.clear();
-        self.blocked_after_nonlinear = true;
+        self.nonlinear_block = Some(block);
     }
 
     fn backspace_target(&self, screen: &Screen) -> Option<Cursor> {
@@ -357,6 +377,16 @@ impl BasePredictor {
             .or(self.edit_anchor)
             .unwrap_or_else(|| screen.cursor())
     }
+
+    fn update_nonlinear_block(&mut self, screen: &Screen) {
+        if self
+            .nonlinear_block
+            .as_ref()
+            .is_some_and(|block| nonlinear_block_released(block, screen))
+        {
+            self.nonlinear_block = None;
+        }
+    }
 }
 
 fn advance_cursor(screen: &Screen, cursor: Cursor, width: u16) -> Cursor {
@@ -393,6 +423,25 @@ fn confirmed_matches_prediction(confirmed: Cell, predicted: Cell) -> bool {
     let mut predicted_confirmed_style = predicted.style;
     predicted_confirmed_style.dim = false;
     confirmed.ch == predicted.ch && confirmed.style == predicted_confirmed_style
+}
+
+fn owned_confirmed(owned: OwnedCell, screen: &Screen) -> bool {
+    let confirmed = screen.cell(owned.pos);
+    confirmed == owned.cell || confirmed_matches_prediction(confirmed, owned.cell)
+}
+
+fn nonlinear_block_released(block: &NonlinearBlock, screen: &Screen) -> bool {
+    if !block
+        .unsettled
+        .iter()
+        .all(|owned| owned_confirmed(*owned, screen))
+    {
+        return false;
+    }
+
+    block
+        .expected_cursor
+        .is_none_or(|expected_cursor| screen.cursor() != expected_cursor)
 }
 
 fn printable_prediction_confirmed(
@@ -1250,6 +1299,52 @@ mod tests {
 
         assert_eq!(predictor.overlay.cells.len(), 1);
         assert_eq!(predictor.overlay.cells[0].cell.ch, 'x');
+    }
+
+    #[test]
+    fn printable_after_cursor_motion_waits_for_pending_echo_to_settle() {
+        let mut screen = screen_with(b"$ ");
+        let mut predictor = BasePredictor::new(true);
+
+        for ch in "abcdef".chars() {
+            predictor.on_key(KeyIntent::Printable(ch), &screen);
+        }
+        feed_each_reconcile(&mut screen, &mut predictor, b"ab");
+        predictor.on_key(KeyIntent::Nonlinear, &screen);
+
+        predictor.on_key(KeyIntent::Printable('X'), &screen);
+        assert!(predictor.overlay.cells.is_empty());
+
+        feed_each_reconcile(&mut screen, &mut predictor, b"cdef");
+        predictor.on_key(KeyIntent::Printable('X'), &screen);
+        assert!(predictor.overlay.cells.is_empty());
+
+        feed(&mut screen, b"\x1b[D");
+        predictor.reconcile(&screen);
+        predictor.on_key(KeyIntent::Printable('X'), &screen);
+
+        assert_eq!(predictor.overlay.cells.len(), 1);
+        assert_eq!(predictor.overlay.cells[0].cell.ch, 'X');
+        assert_eq!(predictor.overlay.cells[0].pos, Cursor { row: 0, col: 7 });
+    }
+
+    #[test]
+    fn printable_after_cursor_motion_on_confirmed_text_waits_for_cursor_move() {
+        let mut screen = screen_with(b"$ abc");
+        let mut predictor = BasePredictor::new(true);
+
+        predictor.on_key(KeyIntent::Nonlinear, &screen);
+        predictor.on_key(KeyIntent::Printable('X'), &screen);
+
+        assert!(predictor.overlay.cells.is_empty());
+
+        feed(&mut screen, b"\x1b[D");
+        predictor.reconcile(&screen);
+        predictor.on_key(KeyIntent::Printable('X'), &screen);
+
+        assert_eq!(predictor.overlay.cells.len(), 1);
+        assert_eq!(predictor.overlay.cells[0].cell.ch, 'X');
+        assert_eq!(predictor.overlay.cells[0].pos, Cursor { row: 0, col: 4 });
     }
 
     #[test]
