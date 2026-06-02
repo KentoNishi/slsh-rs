@@ -115,15 +115,39 @@ jobs:
 
       - name: Ensure Windows Terminal
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = "Stop"
-          if (!(Get-Command wt.exe -ErrorAction SilentlyContinue)) {
-            if (!(Get-Command winget.exe -ErrorAction SilentlyContinue)) {
-              throw "missing wt.exe and winget.exe"
-            }
-            winget install --id Microsoft.WindowsTerminal --exact --source winget --accept-package-agreements --accept-source-agreements
+          $wt = Get-Command wt.exe -ErrorAction SilentlyContinue
+          if ($wt) {
+            "WT_EXE=$($wt.Source)" >> $env:GITHUB_ENV
+            & $wt.Source --version
+            exit 0
           }
-          wt.exe --version
+
+          $arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "x64" }
+          $release = gh api repos/microsoft/terminal/releases/latest
+          $asset = ($release | ConvertFrom-Json).assets |
+            Where-Object { $_.name -match "Microsoft\\.WindowsTerminal_.*_${arch}\\.zip$" } |
+            Select-Object -First 1
+          if (!$asset) {
+            throw "missing Windows Terminal portable zip for $arch"
+          }
+
+          $zip = Join-Path $env:RUNNER_TEMP $asset.name
+          $dir = Join-Path $env:RUNNER_TEMP "WindowsTerminal"
+          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath $dir -Force
+
+          $exe = Get-ChildItem -Path $dir -Recurse -Filter WindowsTerminal.exe |
+            Select-Object -First 1
+          if (!$exe) {
+            throw "WindowsTerminal.exe missing from portable zip"
+          }
+
+          "WT_EXE=$($exe.FullName)" >> $env:GITHUB_ENV
+          & $exe.FullName --version
 
       - name: Windows Terminal PowerShell loopback smoke
         shell: pwsh

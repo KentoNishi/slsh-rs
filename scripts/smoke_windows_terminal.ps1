@@ -32,11 +32,17 @@ if (!(Test-Path $SlshExe)) {
 $stamp = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
 $result = Join-Path $env:TEMP "slsh-wt-result-$stamp.txt"
 $archiveResult = Join-Path $outDir "result-$stamp.txt"
-$wtCommand = Get-Command wt.exe -ErrorAction SilentlyContinue
-if (!$wtCommand) {
-    throw "missing Windows Terminal launcher: wt.exe"
+$wt = $env:WT_EXE
+if ($wt -and !(Test-Path $wt)) {
+    throw "WT_EXE does not exist: $wt"
 }
-$wt = $wtCommand.Source
+if (!$wt) {
+    $wtCommand = Get-Command wt.exe -ErrorAction SilentlyContinue
+    if (!$wtCommand) {
+        throw "missing Windows Terminal launcher: wt.exe"
+    }
+    $wt = $wtCommand.Source
+}
 
 if ($LoopbackPowerShell -and $HostName -eq "wsl") {
     $HostName = "ignored-host"
