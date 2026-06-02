@@ -159,11 +159,12 @@ jobs:
           $arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "x64" }
           $release = gh api repos/microsoft/terminal/releases/latest
           $asset = ($release | ConvertFrom-Json).assets |
-            Where-Object { $_.name -match "Microsoft\\.WindowsTerminal_.*_${arch}\\.zip$" } |
+            Where-Object { $_.name -match "Microsoft\.WindowsTerminal_.*_${arch}\.zip$" } |
             Select-Object -First 1
           if (!$asset) {
             throw "missing Windows Terminal portable zip for $arch"
           }
+          Write-Host "Installing $($asset.name)"
 
           $zip = Join-Path $env:RUNNER_TEMP $asset.name
           New-Item -ItemType Directory -Force -Path $dir | Out-Null
