@@ -1,115 +1,181 @@
-name: build binaries
+name: release binaries
 
 on:
+  release:
+    types:
+      - published
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to upload assets to. Defaults to the latest prerelease.
+        required: false
+        type: string
 
 permissions:
   contents: write
 
 concurrency:
-  group: build-binaries-${{ github.repository }}
+  group: release-binaries-${{ github.repository }}-${{ github.event.release.tag_name || inputs.tag || 'latest-prerelease' }}
   cancel-in-progress: false
 
 jobs:
-  prepare-release:
-    name: prepare release
-    if: github.repository == 'KentoNishi/slsh-dev'
-    runs-on: ubuntu-latest
+  resolve-release:
+    name: resolve release
+    runs-on: ubuntu-24.04
     outputs:
       tag: ${{ steps.release.outputs.tag }}
     steps:
-      - name: Prepare prerelease
+      - name: Resolve release tag
         id: release
         env:
           GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
 
-          tag="dev-latest"
-          title="dev latest"
-          notes="Latest dev binary build from ${GITHUB_SHA}."
-
-          if gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" >/dev/null 2>&1; then
-              gh api \
-                --method PATCH \
-                "repos/${GITHUB_REPOSITORY}/git/refs/tags/${tag}" \
-                -f sha="${GITHUB_SHA}" \
-                -F force=true >/dev/null
-            else
-              gh api \
-                --method POST \
-                "repos/${GITHUB_REPOSITORY}/git/refs" \
-                -f ref="refs/tags/${tag}" \
-                -f sha="${GITHUB_SHA}" >/dev/null
-            fi
-
-            gh release edit "${tag}" \
-              --repo "${GITHUB_REPOSITORY}" \
-              --title "${title}" \
-              --notes "${notes}" \
-              --target "${GITHUB_SHA}" \
-              --prerelease \
-              --latest=false
+          if [ "${EVENT_NAME}" = "release" ]; then
+            tag="${RELEASE_TAG}"
+          elif [ -n "${INPUT_TAG}" ]; then
+            tag="${INPUT_TAG}"
           else
-            gh release create "${tag}" \
-              --repo "${GITHUB_REPOSITORY}" \
-              --title "${title}" \
-              --notes "${notes}" \
-              --target "${GITHUB_SHA}" \
-              --prerelease \
-              --latest=false
+            tag="$(
+              gh release list --repo "${GITHUB_REPOSITORY}" --limit 100 \
+                --json tagName,isPrerelease,isDraft,publishedAt \
+                --jq 'map(select(.isPrerelease and (.isDraft | not)))[0].tagName'
+            )"
+
+            if [ -z "${tag}" ] || [ "${tag}" = "null" ]; then
+              echo "No prerelease found. Pass a release tag manually or create a prerelease first." >&2
+              exit 1
+            fi
           fi
 
+          gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null
           echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
 
   build:
     name: ${{ matrix.name }}
-    if: github.repository == 'KentoNishi/slsh-dev'
+    needs: resolve-release
     runs-on: ${{ matrix.runner }}
-    needs: prepare-release
     strategy:
       fail-fast: false
       matrix:
         include:
           - name: linux x64
-            runner: ubuntu-latest
-            build_args: --target x86_64-unknown-linux-musl
-            rust_target: x86_64-unknown-linux-musl
-            binary: target/x86_64-unknown-linux-musl/release/slsh
-            asset: slsh
+            runner: ubuntu-24.04
+            archive: slsh-linux-x86_64.tar.gz
+            binary: target/release/slsh
+            executable: slsh
+          - name: linux arm64
+            runner: ubuntu-24.04-arm
+            archive: slsh-linux-aarch64.tar.gz
+            binary: target/release/slsh
+            executable: slsh
+          - name: macos x64
+            runner: macos-13
+            archive: slsh-macos-x86_64.tar.gz
+            binary: target/release/slsh
+            executable: slsh
+          - name: macos arm64
+            runner: macos-14
+            archive: slsh-macos-aarch64.tar.gz
+            binary: target/release/slsh
+            executable: slsh
           - name: windows x64
-            runner: windows-latest
-            build_args: ""
-            rust_target: ""
+            runner: windows-2025
+            archive: slsh-windows-x86_64.zip
             binary: target/release/slsh.exe
-            asset: slsh.exe
+            executable: slsh.exe
+          - name: windows arm64
+            runner: windows-11-arm
+            archive: slsh-windows-aarch64.zip
+            binary: target/release/slsh.exe
+            executable: slsh.exe
 
     steps:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Install Rust target
-        if: matrix.rust_target != ''
-        run: rustup target add ${{ matrix.rust_target }}
+      - name: Install Rust
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc -vV
 
       - name: Build release binary
-        run: cargo build --release --locked ${{ matrix.build_args }}
+        shell: bash
+        run: cargo build --release --locked
 
-      - name: Stage binary
+      - name: Package binary
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p dist
-          cp "${{ matrix.binary }}" "dist/${{ matrix.asset }}"
 
-      - name: Upload release asset
-        shell: bash
+          mkdir -p package dist
+          cp "${{ matrix.binary }}" "package/${{ matrix.executable }}"
+          cp README.md DOCUMENTATION.md package/
+          if [ -f LICENSE ]; then
+            cp LICENSE package/
+          fi
+
+          if [ "${{ matrix.executable }}" = "slsh" ]; then
+            chmod 0755 "package/${{ matrix.executable }}"
+          fi
+
+          case "${{ matrix.archive }}" in
+            *.zip)
+              powershell -NoProfile -Command \
+                "Compress-Archive -Path 'package/*' -DestinationPath 'dist/${{ matrix.archive }}' -Force"
+              ;;
+            *.tar.gz)
+              tar -czf "dist/${{ matrix.archive }}" -C package .
+              ;;
+            *)
+              echo "unknown archive type: ${{ matrix.archive }}" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Upload archive artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.archive }}
+          path: dist/${{ matrix.archive }}
+          if-no-files-found: error
+
+  publish:
+    name: publish assets
+    needs:
+      - resolve-release
+      - build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download archives
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create checksums
+        run: |
+          set -euo pipefail
+
+          mkdir -p dist
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' \) -exec cp {} dist/ \;
+          cd dist
+          sha256sum slsh-* > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Upload release assets
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.resolve-release.outputs.tag }}
         run: |
           set -euo pipefail
-          gh release upload "${{ needs.prepare-release.outputs.tag }}" \
-            "dist/${{ matrix.asset }}" \
+
+          gh release upload "${RELEASE_TAG}" dist/slsh-* dist/SHA256SUMS \
             --repo "${GITHUB_REPOSITORY}" \
             --clobber
