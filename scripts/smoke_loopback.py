@@ -14,6 +14,18 @@ import time
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 
+def loopback_env(delay_ms=None):
+    env = os.environ.copy()
+    env["SLSH_LOOPBACK"] = "1"
+    env.setdefault("SHELL", "/bin/sh")
+    env["BASH_SILENCE_DEPRECATION_WARNING"] = "1"
+    env.pop("ENV", None)
+    env.pop("BASH_ENV", None)
+    if delay_ms is not None:
+        env["SLSH_DELAY_MS"] = delay_ms
+    return env
+
+
 def main() -> int:
     subprocess.run(["cargo", "build"], cwd=ROOT, check=True)
 
@@ -89,9 +101,7 @@ def main() -> int:
 
 def run_loopback_shell(marker: str) -> bytes:
     argv = [os.path.join(ROOT, "target", "debug", "slsh"), "ignored-host"]
-    env = os.environ.copy()
-    env["SLSH_LOOPBACK"] = "1"
-    env.setdefault("SHELL", "/bin/sh")
+    env = loopback_env()
 
     pid, fd = pty.fork()
     if pid == 0:
@@ -142,18 +152,13 @@ def run_loopback_shell(marker: str) -> bytes:
 
 def run_loopback_command(marker: str) -> bytes:
     argv = [os.path.join(ROOT, "target", "debug", "slsh"), "ignored-host", "echo", marker]
-    env = os.environ.copy()
-    env["SLSH_LOOPBACK"] = "1"
-    env.setdefault("SHELL", "/bin/sh")
+    env = loopback_env()
     return run_and_collect(argv, env)
 
 
 def run_delayed_local_echo() -> bytes:
     argv = [os.path.join(ROOT, "target", "debug", "slsh"), "ignored-host"]
-    env = os.environ.copy()
-    env["SLSH_LOOPBACK"] = "1"
-    env["SLSH_DELAY_MS"] = "1000"
-    env.setdefault("SHELL", "/bin/sh")
+    env = loopback_env("1000")
 
     pid, fd = pty.fork()
     if pid == 0:
@@ -196,10 +201,7 @@ def run_delayed_local_echo() -> bytes:
 
 def run_delayed_submit_overlay() -> bytes:
     argv = [os.path.join(ROOT, "target", "debug", "slsh"), "ignored-host"]
-    env = os.environ.copy()
-    env["SLSH_LOOPBACK"] = "1"
-    env["SLSH_DELAY_MS"] = "1000"
-    env.setdefault("SHELL", "/bin/sh")
+    env = loopback_env("1000")
 
     pid, fd = pty.fork()
     if pid == 0:
@@ -242,10 +244,7 @@ def run_delayed_submit_overlay() -> bytes:
 
 def run_seeded_cursor_overlay() -> bytes:
     argv = [os.path.join(ROOT, "target", "debug", "slsh"), "ignored-host"]
-    env = os.environ.copy()
-    env["SLSH_LOOPBACK"] = "1"
-    env["SLSH_DELAY_MS"] = "1000"
-    env.setdefault("SHELL", "/bin/sh")
+    env = loopback_env("1000")
 
     pid, fd = pty.fork()
     if pid == 0:
@@ -297,10 +296,7 @@ def run_seeded_cursor_overlay() -> bytes:
 
 def run_scrolled_overlay() -> bytes:
     argv = [os.path.join(ROOT, "target", "debug", "slsh"), "ignored-host"]
-    env = os.environ.copy()
-    env["SLSH_LOOPBACK"] = "1"
-    env["SLSH_DELAY_MS"] = "1000"
-    env.setdefault("SHELL", "/bin/sh")
+    env = loopback_env("1000")
 
     pid, fd = pty.fork()
     if pid == 0:
@@ -352,10 +348,7 @@ def run_scrolled_overlay() -> bytes:
 
 def run_app_prefix_guard() -> bytes:
     argv = [os.path.join(ROOT, "target", "debug", "slsh"), "ignored-host"]
-    env = os.environ.copy()
-    env["SLSH_LOOPBACK"] = "1"
-    env["SLSH_DELAY_MS"] = "1000"
-    env.setdefault("SHELL", "/bin/sh")
+    env = loopback_env("1000")
 
     pid, fd = pty.fork()
     if pid == 0:
@@ -414,10 +407,7 @@ def run_app_prefix_guard() -> bytes:
 
 def run_app_cursor_overlay() -> bytes:
     argv = [os.path.join(ROOT, "target", "debug", "slsh"), "ignored-host"]
-    env = os.environ.copy()
-    env["SLSH_LOOPBACK"] = "1"
-    env["SLSH_DELAY_MS"] = "1000"
-    env.setdefault("SHELL", "/bin/sh")
+    env = loopback_env("1000")
 
     pid, fd = pty.fork()
     if pid == 0:
@@ -477,9 +467,7 @@ def run_app_cursor_overlay() -> bytes:
 
 def run_mouse_forwarding(sgr: bool) -> bytes:
     argv = [os.path.join(ROOT, "target", "debug", "slsh"), "ignored-host"]
-    env = os.environ.copy()
-    env["SLSH_LOOPBACK"] = "1"
-    env.setdefault("SHELL", "/bin/sh")
+    env = loopback_env()
 
     pid, fd = pty.fork()
     if pid == 0:
