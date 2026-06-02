@@ -15,9 +15,11 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/KentoNishi/slsh/releases/latest">View Releases</a>
+  <a href="https://slsh-rs.github.io">slsh-rs.github.io</a>
   /
-  <a href="DOCUMENTATION.md">View Documentation</a>
+  <a href="https://github.com/KentoNishi/slsh/releases/latest">Download Latest Release</a>
+  /
+  <a href="DOCUMENTATION.md">Read Documentation</a>
 </p>
 
 <p align="center">
