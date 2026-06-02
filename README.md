@@ -4,7 +4,7 @@
 
 <p align="center">
   <a href="https://github.com/KentoNishi/slsh/releases/latest">
-    <img src="https://img.shields.io/github/v/release/KentoNishi/slsh?label=latest%20version&style=flat" alt="latest version">
+    <img src="https://img.shields.io/github/v/release/KentoNishi/slsh?label=latest%20version&color=green&style=flat" alt="latest version">
   </a>
   <img src="https://img.shields.io/badge/license-MIT-green?style=flat" alt="license: MIT">
   <img src="https://img.shields.io/badge/platforms-linux%20%7C%20macOS%20%7C%20windows-blue?style=flat" alt="platforms: linux, macOS, windows">
