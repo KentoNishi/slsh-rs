@@ -111,6 +111,11 @@ jobs:
           rustup default stable
           rustc -vV
 
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.runner }}
+
       - name: Build release binary
         shell: bash
         run: cargo build --release --locked

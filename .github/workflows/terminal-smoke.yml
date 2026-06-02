@@ -29,6 +29,11 @@ jobs:
           rustup default stable
           rustc -vV
 
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: terminal-smoke-linux
+
       - name: Install sshd
         run: |
           set -euo pipefail
@@ -69,6 +74,11 @@ jobs:
           rustup default stable
           rustc -vV
 
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: terminal-smoke-${{ matrix.runner }}
+
       - name: Unit tests
         run: cargo test --locked
 
@@ -101,6 +111,11 @@ jobs:
           rustup default stable
           rustc -vV
 
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: terminal-smoke-${{ matrix.runner }}
+
       - name: Unit tests
         shell: bash
         run: cargo test --locked
@@ -112,6 +127,12 @@ jobs:
       - name: ConPTY harness self-test
         shell: pwsh
         run: ./scripts/smoke_windows_conpty.ps1 -SelfTest
+
+      - name: Cache Windows Terminal
+        uses: actions/cache@v4
+        with:
+          path: .cache/WindowsTerminal
+          key: windows-terminal-${{ matrix.runner }}-v1
 
       - name: Ensure Windows Terminal
         shell: pwsh
@@ -126,6 +147,15 @@ jobs:
             exit 0
           }
 
+          $dir = Join-Path $env:GITHUB_WORKSPACE ".cache\WindowsTerminal"
+          $cachedExe = Get-ChildItem -Path $dir -Recurse -Filter WindowsTerminal.exe -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+          if ($cachedExe) {
+            "WT_EXE=$($cachedExe.FullName)" >> $env:GITHUB_ENV
+            & $cachedExe.FullName --version
+            exit 0
+          }
+
           $arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "x64" }
           $release = gh api repos/microsoft/terminal/releases/latest
           $asset = ($release | ConvertFrom-Json).assets |
@@ -136,7 +166,7 @@ jobs:
           }
 
           $zip = Join-Path $env:RUNNER_TEMP $asset.name
-          $dir = Join-Path $env:RUNNER_TEMP "WindowsTerminal"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
           Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zip
           Expand-Archive -Path $zip -DestinationPath $dir -Force
 
