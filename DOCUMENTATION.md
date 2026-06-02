@@ -28,73 +28,47 @@ For noninteractive sessions, `slsh` runs plain `ssh` passthrough.
 
 ## Install
 
-Download a release archive from:
+<!-- INSTALL-COMMANDS:START -->
 
-```text
-https://github.com/KentoNishi/slsh/releases/latest
-```
-
-Release assets are named by operating system and architecture:
-
-| Platform | x64 | ARM64 |
-| --- | --- | --- |
-| Linux | `slsh-linux-x86_64.tar.gz` | `slsh-linux-aarch64.tar.gz` |
-| macOS | `slsh-macos-x86_64.tar.gz` | `slsh-macos-aarch64.tar.gz` |
-| Windows | `slsh-windows-x86_64.zip` | `slsh-windows-aarch64.zip` |
-
-Each release also includes `SHA256SUMS`.
-
-Linux:
+Linux x86_64:
 
 ```sh
-ASSET=slsh-linux-x86_64.tar.gz
-BASE=https://github.com/KentoNishi/slsh/releases/latest/download
-
-curl -LO "$BASE/$ASSET"
-curl -LO "$BASE/SHA256SUMS"
-grep " $ASSET$" SHA256SUMS | sha256sum -c -
-
-tar -xzf "$ASSET"
-sudo install -m 0755 slsh /usr/local/bin/slsh
+sudo curl -fsSLo /usr/local/bin/slsh https://github.com/KentoNishi/slsh/releases/latest/download/slsh-linux-x86_64 && echo '0000000000000000000000000000000000000000000000000000000000000000  /usr/local/bin/slsh' | sha256sum -c - && sudo chmod +x /usr/local/bin/slsh
 ```
 
-macOS:
+Linux ARM64:
 
 ```sh
-ASSET=slsh-macos-aarch64.tar.gz
-BASE=https://github.com/KentoNishi/slsh/releases/latest/download
-
-curl -LO "$BASE/$ASSET"
-curl -LO "$BASE/SHA256SUMS"
-grep " $ASSET$" SHA256SUMS | shasum -a 256 -c -
-
-tar -xzf "$ASSET"
-sudo install -m 0755 slsh /usr/local/bin/slsh
+sudo curl -fsSLo /usr/local/bin/slsh https://github.com/KentoNishi/slsh/releases/latest/download/slsh-linux-aarch64 && echo '0000000000000000000000000000000000000000000000000000000000000000  /usr/local/bin/slsh' | sha256sum -c - && sudo chmod +x /usr/local/bin/slsh
 ```
 
-Windows PowerShell:
+macOS x86_64:
+
+```sh
+sudo curl -fsSLo /usr/local/bin/slsh https://github.com/KentoNishi/slsh/releases/latest/download/slsh-macos-x86_64 && echo '0000000000000000000000000000000000000000000000000000000000000000  /usr/local/bin/slsh' | shasum -a 256 -c - && sudo chmod +x /usr/local/bin/slsh
+```
+
+macOS ARM64:
+
+```sh
+sudo curl -fsSLo /usr/local/bin/slsh https://github.com/KentoNishi/slsh/releases/latest/download/slsh-macos-aarch64 && echo '0000000000000000000000000000000000000000000000000000000000000000  /usr/local/bin/slsh' | shasum -a 256 -c - && sudo chmod +x /usr/local/bin/slsh
+```
+
+Windows x86_64 (PowerShell):
 
 ```powershell
-$Asset = "slsh-windows-x86_64.zip"
-$Base = "https://github.com/KentoNishi/slsh/releases/latest/download"
-
-Invoke-WebRequest "$Base/$Asset" -OutFile $Asset
-Invoke-WebRequest "$Base/SHA256SUMS" -OutFile SHA256SUMS
-
-$Expected = (Select-String -Path SHA256SUMS -Pattern " $Asset$").Line.Split(" ")[0]
-$Actual = (Get-FileHash $Asset -Algorithm SHA256).Hash.ToLower()
-if ($Actual -ne $Expected) { throw "checksum mismatch" }
-
-New-Item -ItemType Directory "$HOME\bin" -Force | Out-Null
-Expand-Archive $Asset -DestinationPath "$HOME\bin" -Force
-
-$UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
-if ($UserPath -notlike "*$HOME\bin*") {
-  [Environment]::SetEnvironmentVariable("Path", "$UserPath;$HOME\bin", "User")
-}
+iwr https://github.com/KentoNishi/slsh/releases/latest/download/slsh-windows-x86_64.exe -OutFile $env:LOCALAPPDATA\Microsoft\WindowsApps\slsh.exe; if((Get-FileHash $env:LOCALAPPDATA\Microsoft\WindowsApps\slsh.exe).Hash -ine '0000000000000000000000000000000000000000000000000000000000000000'){exit 1}
 ```
 
-Open a new terminal after changing `PATH`.
+Windows ARM64 (PowerShell):
+
+```powershell
+iwr https://github.com/KentoNishi/slsh/releases/latest/download/slsh-windows-aarch64.exe -OutFile $env:LOCALAPPDATA\Microsoft\WindowsApps\slsh.exe; if((Get-FileHash $env:LOCALAPPDATA\Microsoft\WindowsApps\slsh.exe).Hash -ine '0000000000000000000000000000000000000000000000000000000000000000'){exit 1}
+```
+
+Each command downloads the latest release asset, checks its hardcoded SHA-256, and installs `slsh` into the platform PATH.
+
+<!-- INSTALL-COMMANDS:END -->
 
 Build from source:
 
