@@ -64,8 +64,8 @@ def section(checksums: dict[str, str]) -> str:
         lines.append("```")
         lines.append("")
     lines.append(
-        "Each command downloads the latest release asset, checks its hardcoded "
-        "SHA-256, and installs `slsh` into the platform PATH."
+        "Each command downloads the latest release asset, checks its SHA-256, "
+        "and installs `slsh` into the platform PATH."
     )
     lines.append("")
     lines.append(END)
