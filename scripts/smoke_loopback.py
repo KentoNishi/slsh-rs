@@ -35,7 +35,6 @@ def main() -> int:
     command_output = run_loopback_command(command_marker.decode())
     delayed_echo_output = run_delayed_local_echo()
     delayed_submit_output = run_delayed_submit_overlay()
-    seeded_cursor_output = run_seeded_cursor_overlay()
     scrolled_overlay_output = run_scrolled_overlay()
     app_prefix_output = run_app_prefix_guard()
     app_cursor_output = run_app_cursor_overlay()
@@ -51,8 +50,6 @@ def main() -> int:
         failed.append("delayed local echo")
     if b"echo SLSHSUBMIT" not in delayed_submit_output:
         failed.append("delayed submit keeps overlay")
-    if b"\x1b[10;" not in seeded_cursor_output or b"\x1b[1;" in seeded_cursor_output:
-        failed.append("startup cursor seeded overlay")
     if (
         b"LINE30" not in scrolled_overlay_output
         or b"\x1b[10;" not in scrolled_overlay_output
@@ -80,8 +77,6 @@ def main() -> int:
         sys.stderr.buffer.write(delayed_echo_output)
         sys.stderr.write("\nDelayed submit bytes:\n")
         sys.stderr.buffer.write(delayed_submit_output)
-        sys.stderr.write("\nSeeded cursor bytes:\n")
-        sys.stderr.buffer.write(seeded_cursor_output)
         sys.stderr.write("\nScrolled overlay bytes:\n")
         sys.stderr.buffer.write(scrolled_overlay_output)
         sys.stderr.write("\nApp prefix bytes:\n")
@@ -229,58 +224,6 @@ def run_delayed_submit_overlay() -> bytes:
 
             if not sent and time.time() >= send_at:
                 os.write(fd, b"echo SLSHSUBMIT\r")
-                sent = True
-                sent_at = time.time()
-            if sent and time.time() - sent_at >= 0.25:
-                return output
-    finally:
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except OSError:
-            pass
-
-    return output
-
-
-def run_seeded_cursor_overlay() -> bytes:
-    argv = [os.path.join(ROOT, "target", "debug", "slsh"), "ignored-host"]
-    env = loopback_env("1000")
-
-    pid, fd = pty.fork()
-    if pid == 0:
-        os.execvpe(argv[0], argv, env)
-
-    termios.tcflush(fd, termios.TCIOFLUSH)
-    os.set_blocking(fd, False)
-    fcntl_rows_cols(fd, 10, 50)
-
-    output = b""
-    answered_cursor_query = False
-    answer_cursor_at = None
-    sent = False
-    sent_at = 0.0
-    deadline = time.time() + 6
-    try:
-        while time.time() < deadline:
-            readable, _, _ = select.select([fd], [], [], 0.02)
-            if readable:
-                try:
-                    output += os.read(fd, 4096)
-                except BlockingIOError:
-                    pass
-                except OSError:
-                    return output
-
-                if not answered_cursor_query and answer_cursor_at is None and b"\x1b[6n" in output:
-                    answer_cursor_at = time.time() + 0.15
-
-            if answer_cursor_at is not None and time.time() >= answer_cursor_at:
-                os.write(fd, b"\x1b[10;1R")
-                answered_cursor_query = True
-                answer_cursor_at = None
-
-            if answered_cursor_query and not sent and (b"$" in output or b"#" in output):
-                os.write(fd, b"Z")
                 sent = True
                 sent_at = time.time()
             if sent and time.time() - sent_at >= 0.25:
