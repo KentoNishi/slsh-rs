@@ -65,34 +65,28 @@ jobs:
         include:
           - name: linux x64
             runner: ubuntu-24.04
-            archive: slsh-linux-x86_64.tar.gz
+            asset: slsh-linux-x86_64
             binary: target/release/slsh
-            executable: slsh
           - name: linux arm64
             runner: ubuntu-24.04-arm
-            archive: slsh-linux-aarch64.tar.gz
+            asset: slsh-linux-aarch64
             binary: target/release/slsh
-            executable: slsh
           - name: macos x64
             runner: macos-13
-            archive: slsh-macos-x86_64.tar.gz
+            asset: slsh-macos-x86_64
             binary: target/release/slsh
-            executable: slsh
           - name: macos arm64
             runner: macos-14
-            archive: slsh-macos-aarch64.tar.gz
+            asset: slsh-macos-aarch64
             binary: target/release/slsh
-            executable: slsh
           - name: windows x64
             runner: windows-2025
-            archive: slsh-windows-x86_64.zip
+            asset: slsh-windows-x86_64.exe
             binary: target/release/slsh.exe
-            executable: slsh.exe
           - name: windows arm64
             runner: windows-11-arm
-            archive: slsh-windows-aarch64.zip
+            asset: slsh-windows-aarch64.exe
             binary: target/release/slsh.exe
-            executable: slsh.exe
 
     steps:
       - name: Checkout
@@ -115,36 +109,17 @@ jobs:
         run: |
           set -euo pipefail
 
-          mkdir -p package dist
-          cp "${{ matrix.binary }}" "package/${{ matrix.executable }}"
-          cp README.md DOCUMENTATION.md package/
-          if [ -f LICENSE ]; then
-            cp LICENSE package/
+          mkdir -p dist
+          cp "${{ matrix.binary }}" "dist/${{ matrix.asset }}"
+          if [[ "${{ matrix.asset }}" != *.exe ]]; then
+            chmod 0755 "dist/${{ matrix.asset }}"
           fi
 
-          if [ "${{ matrix.executable }}" = "slsh" ]; then
-            chmod 0755 "package/${{ matrix.executable }}"
-          fi
-
-          case "${{ matrix.archive }}" in
-            *.zip)
-              powershell -NoProfile -Command \
-                "Compress-Archive -Path 'package/*' -DestinationPath 'dist/${{ matrix.archive }}' -Force"
-              ;;
-            *.tar.gz)
-              tar -czf "dist/${{ matrix.archive }}" -C package .
-              ;;
-            *)
-              echo "unknown archive type: ${{ matrix.archive }}" >&2
-              exit 1
-              ;;
-          esac
-
-      - name: Upload archive artifact
+      - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.archive }}
-          path: dist/${{ matrix.archive }}
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
           if-no-files-found: error
 
   publish:
@@ -154,7 +129,13 @@ jobs:
       - build
     runs-on: ubuntu-24.04
     steps:
-      - name: Download archives
+      - name: Checkout release branch
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: master
+
+      - name: Download binaries
         uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -164,10 +145,31 @@ jobs:
           set -euo pipefail
 
           mkdir -p dist
-          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' \) -exec cp {} dist/ \;
+          find artifacts -type f -name 'slsh-*' -exec cp {} dist/ \;
           cd dist
           sha256sum slsh-* > SHA256SUMS
           cat SHA256SUMS
+
+      - name: Update docs and move release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.resolve-release.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          python3 scripts/update_release_docs.py dist/SHA256SUMS README.md DOCUMENTATION.md
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if ! git diff --quiet -- README.md DOCUMENTATION.md; then
+            git add README.md DOCUMENTATION.md
+            git commit -m "release checksums"
+            git push origin HEAD:master
+          fi
+
+          git tag -f "${RELEASE_TAG}" HEAD
+          git push --force origin "refs/tags/${RELEASE_TAG}"
 
       - name: Upload release assets
         env:
@@ -175,6 +177,21 @@ jobs:
           RELEASE_TAG: ${{ needs.resolve-release.outputs.tag }}
         run: |
           set -euo pipefail
+
+          while IFS= read -r name; do
+            case "${name}" in
+              *.tar.gz|*.zip)
+                gh release delete-asset "${RELEASE_TAG}" "${name}" \
+                  --repo "${GITHUB_REPOSITORY}" \
+                  --yes
+                ;;
+            esac
+          done < <(
+            gh release view "${RELEASE_TAG}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --json assets \
+              --jq '.assets[].name'
+          )
 
           gh release upload "${RELEASE_TAG}" dist/slsh-* dist/SHA256SUMS \
             --repo "${GITHUB_REPOSITORY}" \
