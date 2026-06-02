@@ -1,0 +1,127 @@
+name: terminal smoke
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: terminal-smoke-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  linux:
+    name: linux pty and sshd
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc -vV
+
+      - name: Install sshd
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y openssh-server
+
+      - name: Unit tests
+        run: cargo test --locked
+
+      - name: Loopback compositor smoke
+        run: python3 scripts/smoke_loopback.py
+
+      - name: Fake ssh PTY smoke
+        run: python3 scripts/smoke_local_pty.py
+
+      - name: Local sshd smoke
+        run: python3 scripts/smoke_local_sshd.py
+
+  macos:
+    name: ${{ matrix.name }} pty
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos x64
+            runner: macos-15-intel
+          - name: macos arm64
+            runner: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc -vV
+
+      - name: Unit tests
+        run: cargo test --locked
+
+      - name: Loopback compositor smoke
+        run: python3 scripts/smoke_loopback.py
+
+      - name: Fake ssh PTY smoke
+        run: python3 scripts/smoke_local_pty.py
+
+  windows:
+    name: ${{ matrix.name }} conpty
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows x64
+            runner: windows-2025
+          - name: windows arm64
+            runner: windows-11-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc -vV
+
+      - name: Unit tests
+        shell: bash
+        run: cargo test --locked
+
+      - name: Build release binary
+        shell: bash
+        run: cargo build --release --locked
+
+      - name: ConPTY harness self-test
+        shell: pwsh
+        run: ./scripts/smoke_windows_conpty.ps1 -SelfTest
+
+      - name: Ensure Windows Terminal
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          if (!(Get-Command wt.exe -ErrorAction SilentlyContinue)) {
+            if (!(Get-Command winget.exe -ErrorAction SilentlyContinue)) {
+              throw "missing wt.exe and winget.exe"
+            }
+            winget install --id Microsoft.WindowsTerminal --exact --source winget --accept-package-agreements --accept-source-agreements
+          }
+          wt.exe --version
+
+      - name: Windows Terminal PowerShell loopback smoke
+        shell: pwsh
+        run: ./scripts/smoke_windows_terminal.ps1 -SlshExe target/release/slsh.exe -HostName ignored-host -LoopbackPowerShell

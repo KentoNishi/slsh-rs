@@ -38,23 +38,27 @@ class WindowsTerminalSmoke
 
     static int Main(string[] args)
     {
-        if (args.Length < 3)
+        bool loopbackPowerShell = args.Length > 0 && args[0] == "--loopback-powershell";
+        int offset = loopbackPowerShell ? 1 : 0;
+        if (args.Length < offset + 3)
         {
-            Console.Error.WriteLine("usage: WindowsTerminalSmoke.exe <slsh.exe> <host> <result-path>");
+            Console.Error.WriteLine("usage: WindowsTerminalSmoke.exe [--loopback-powershell] <slsh.exe> <host> <result-path>");
             return 2;
         }
 
-        string slshExe = args[0];
-        string host = args[1];
-        string resultPath = args[2];
+        string slshExe = args[offset];
+        string host = args[offset + 1];
+        string resultPath = args[offset + 2];
         tracePath = resultPath + ".trace";
         string stamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString();
-        string backspaceMarker = "/tmp/slsh-wt-backspace-" + stamp;
+        string markerDir = Path.Combine(Path.GetTempPath(), "slsh-wt-smoke-" + stamp);
+        Directory.CreateDirectory(markerDir);
+        string backspaceMarker = loopbackPowerShell ? Path.Combine(markerDir, "backspace") : "/tmp/slsh-wt-backspace-" + stamp;
         string backspaceWrongMarker = backspaceMarker + "x";
-        string cancelledMarker = "/tmp/slsh-wt-cancelled-" + stamp;
-        string ctrlMarker = "/tmp/slsh-wt-ctrl-" + stamp;
-        string keyMarker = "/tmp/slsh-wt-keys-" + stamp;
-        string renderMarker = "/tmp/slsh-wt-render-" + stamp;
+        string cancelledMarker = loopbackPowerShell ? Path.Combine(markerDir, "cancelled") : "/tmp/slsh-wt-cancelled-" + stamp;
+        string ctrlMarker = loopbackPowerShell ? Path.Combine(markerDir, "ctrl") : "/tmp/slsh-wt-ctrl-" + stamp;
+        string keyMarker = loopbackPowerShell ? Path.Combine(markerDir, "keys") : "/tmp/slsh-wt-keys-" + stamp;
+        string renderMarker = loopbackPowerShell ? Path.Combine(markerDir, "render") : "/tmp/slsh-wt-render-" + stamp;
         string logPath = Path.Combine(Path.GetTempPath(), "slsh-wt-smoke-" + stamp + ".log");
         string ssh = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "System32", "OpenSSH", "ssh.exe");
 
@@ -64,61 +68,96 @@ class WindowsTerminalSmoke
             if (File.Exists(resultPath)) File.Delete(resultPath);
             if (File.Exists(tracePath)) File.Delete(tracePath);
             Trace("start");
-            RunChecked(ssh, SshArgs(host,
-                "rm -f '" + backspaceMarker + "' '" + backspaceWrongMarker + "' '" + cancelledMarker + "' '" + ctrlMarker + "' '" + keyMarker + "' '" + renderMarker + "'"
-            ), "prepare markers");
+            if (loopbackPowerShell)
+            {
+                DeleteLocal(backspaceMarker, backspaceWrongMarker, cancelledMarker, ctrlMarker, keyMarker, renderMarker);
+            }
+            else
+            {
+                RunChecked(ssh, SshArgs(host,
+                    "rm -f '" + backspaceMarker + "' '" + backspaceWrongMarker + "' '" + cancelledMarker + "' '" + ctrlMarker + "' '" + keyMarker + "' '" + renderMarker + "'"
+                ), "prepare markers");
+            }
             Trace("prepared markers");
 
             ProcessStartInfo start = new ProcessStartInfo(slshExe, Quote(host));
             start.WorkingDirectory = Path.GetDirectoryName(slshExe);
             start.UseShellExecute = false;
             start.EnvironmentVariables["SLSH_KEY_LOG"] = logPath;
+            if (loopbackPowerShell)
+            {
+                start.EnvironmentVariables["SLSH_LOOPBACK"] = "1";
+                start.EnvironmentVariables["COMSPEC"] = WindowsPowerShellPath();
+            }
 
             using (Process process = Process.Start(start))
             {
                 Trace("started slsh pid " + process.Id);
                 Thread.Sleep(5000);
 
-                Text("touch " + backspaceWrongMarker);
+                Text(loopbackPowerShell
+                    ? "New-Item -ItemType File -Force " + backspaceWrongMarker
+                    : "touch " + backspaceWrongMarker);
                 Backspace();
                 Enter();
-                RequireRemoteFile(ssh, host, backspaceMarker, 40, "backspace marker");
-                RequireMissingRemoteFile(ssh, host, backspaceWrongMarker, "backspace wrong marker");
+                RequireFile(loopbackPowerShell, ssh, host, backspaceMarker, 40, "backspace marker");
+                RequireMissingFile(loopbackPowerShell, ssh, host, backspaceWrongMarker, "backspace wrong marker");
                 Trace("backspace passed");
 
-                Text("touch " + cancelledMarker);
+                Text(loopbackPowerShell
+                    ? "Start-Sleep 10; New-Item -ItemType File -Force " + cancelledMarker
+                    : "touch " + cancelledMarker);
                 CtrlC();
                 Thread.Sleep(500);
-                Text("touch " + ctrlMarker);
+                Text(loopbackPowerShell
+                    ? "New-Item -ItemType File -Force " + ctrlMarker
+                    : "touch " + ctrlMarker);
                 Enter();
-                RequireRemoteFile(ssh, host, ctrlMarker, 40, "ctrl-c followup marker");
-                RequireMissingRemoteFile(ssh, host, cancelledMarker, "ctrl-c cancelled marker");
+                RequireFile(loopbackPowerShell, ssh, host, ctrlMarker, 40, "ctrl-c followup marker");
+                RequireMissingFile(loopbackPowerShell, ssh, host, cancelledMarker, "ctrl-c cancelled marker");
                 Trace("ctrl-c passed");
 
-                Text("printf '\\033[?1h'");
-                Enter();
-                Thread.Sleep(500);
-                Text("cat > " + keyMarker);
-                Enter();
-                Thread.Sleep(500);
-                CtrlLeft();
-                CtrlRight();
-                CtrlDelete();
-                CtrlX();
-                Up();
-                Down();
-                Enter();
-                CtrlD();
-                RequireRemoteFile(ssh, host, keyMarker, 40, "modified key marker");
-                RequireRemoteModifiedKeyBytes(ssh, host, keyMarker);
-                Text("printf '\\033[?1l'");
-                Enter();
-                Thread.Sleep(500);
+                if (loopbackPowerShell)
+                {
+                    CtrlLeft();
+                    CtrlRight();
+                    CtrlDelete();
+                    CtrlX();
+                    Up();
+                    Down();
+                    RequireLocalKeyLogBytes(logPath);
+                    CtrlC();
+                    Thread.Sleep(500);
+                }
+                else
+                {
+                    Text("printf '\\033[?1h'");
+                    Enter();
+                    Thread.Sleep(500);
+                    Text("cat > " + keyMarker);
+                    Enter();
+                    Thread.Sleep(500);
+                    CtrlLeft();
+                    CtrlRight();
+                    CtrlDelete();
+                    CtrlX();
+                    Up();
+                    Down();
+                    Enter();
+                    CtrlD();
+                    RequireRemoteFile(ssh, host, keyMarker, 40, "modified key marker");
+                    RequireRemoteModifiedKeyBytes(ssh, host, keyMarker);
+                    Text("printf '\\033[?1l'");
+                    Enter();
+                    Thread.Sleep(500);
+                }
                 Trace("modified keys passed");
 
-                Text("printf '\\033[31mSLSHWT%s\\033[0m\\n\\033)0\\016lqk\\017\\n' RED; touch " + renderMarker);
+                Text(loopbackPowerShell
+                    ? "Write-Host SLSHWTRED -ForegroundColor Red; New-Item -ItemType File -Force " + renderMarker
+                    : "printf '\\033[31mSLSHWT%s\\033[0m\\n\\033)0\\016lqk\\017\\n' RED; touch " + renderMarker);
                 Enter();
-                RequireRemoteFile(ssh, host, renderMarker, 40, "render marker");
+                RequireFile(loopbackPowerShell, ssh, host, renderMarker, 40, "render marker");
                 Trace("render marker passed");
 
                 Text("exit");
@@ -245,6 +284,72 @@ class WindowsTerminalSmoke
         string command = "python3 -c \"import pathlib,sys; data=pathlib.Path('" + path + "').read_bytes(); esc=bytes([27]); expected=esc+b'[1;5D'+esc+b'[1;5C'+esc+b'[3;5~'+bytes([24])+esc+b'OA'+esc+b'OB'; sys.exit(0 if expected in data else 1)\"";
         if (Run(ssh, SshArgs(host, command)) != 0)
             throw new InvalidOperationException("modified key bytes missing from " + path);
+    }
+
+    static void RequireFile(bool local, string ssh, string host, string path, int attempts, string label)
+    {
+        if (!local)
+        {
+            RequireRemoteFile(ssh, host, path, attempts, label);
+            return;
+        }
+
+        for (int i = 0; i < attempts; i++)
+        {
+            Thread.Sleep(500);
+            if (File.Exists(path)) return;
+        }
+        throw new InvalidOperationException(label + " was not created: " + path);
+    }
+
+    static void RequireMissingFile(bool local, string ssh, string host, string path, string label)
+    {
+        if (!local)
+        {
+            RequireMissingRemoteFile(ssh, host, path, label);
+            return;
+        }
+
+        if (File.Exists(path))
+            throw new InvalidOperationException(label + " unexpectedly exists: " + path);
+    }
+
+    static void RequireLocalKeyLogBytes(string logPath)
+    {
+        for (int i = 0; i < 20; i++)
+        {
+            Thread.Sleep(250);
+            if (!File.Exists(logPath)) continue;
+            string log = ReadShared(logPath);
+            if (log.Contains("bytes [27, 91, 49, 59, 53, 68]")
+                && log.Contains("bytes [27, 91, 49, 59, 53, 67]")
+                && log.Contains("bytes [27, 91, 51, 59, 53, 126]")
+                && log.Contains("bytes [24]")
+                && log.Contains("bytes [27, 91, 65]")
+                && log.Contains("bytes [27, 91, 66]"))
+                return;
+        }
+
+        string text = File.Exists(logPath) ? ReadShared(logPath) : "";
+        throw new InvalidOperationException("modified key bytes missing from key log:\n" + text);
+    }
+
+    static void DeleteLocal(params string[] paths)
+    {
+        foreach (string path in paths)
+        {
+            if (File.Exists(path)) File.Delete(path);
+        }
+    }
+
+    static string WindowsPowerShellPath()
+    {
+        return Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+            "System32",
+            "WindowsPowerShell",
+            "v1.0",
+            "powershell.exe");
     }
 
     static void WriteResult(string resultPath, string header, string logPath)

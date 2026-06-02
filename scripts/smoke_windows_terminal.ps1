@@ -1,6 +1,7 @@
 param(
     [string]$SlshExe = "",
-    [string]$HostName = "wsl"
+    [string]$HostName = "wsl",
+    [switch]$LoopbackPowerShell
 )
 
 $ErrorActionPreference = "Stop"
@@ -31,16 +32,25 @@ if (!(Test-Path $SlshExe)) {
 $stamp = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
 $result = Join-Path $env:TEMP "slsh-wt-result-$stamp.txt"
 $archiveResult = Join-Path $outDir "result-$stamp.txt"
-$wt = Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps\wt.exe"
-if (!(Test-Path $wt)) {
-    throw "missing Windows Terminal launcher: $wt"
+$wtCommand = Get-Command wt.exe -ErrorAction SilentlyContinue
+if (!$wtCommand) {
+    throw "missing Windows Terminal launcher: wt.exe"
+}
+$wt = $wtCommand.Source
+
+if ($LoopbackPowerShell -and $HostName -eq "wsl") {
+    $HostName = "ignored-host"
 }
 
 if (Test-Path $result) {
     Remove-Item -Force $result
 }
 
-& $wt new-tab --title "SLSH-WT-SMOKE-$stamp" $exe $SlshExe $HostName $result
+if ($LoopbackPowerShell) {
+    & $wt new-tab --title "SLSH-WT-SMOKE-$stamp" $exe --loopback-powershell $SlshExe $HostName $result
+} else {
+    & $wt new-tab --title "SLSH-WT-SMOKE-$stamp" $exe $SlshExe $HostName $result
+}
 
 for ($i = 0; $i -lt 180; $i++) {
     if (Test-Path $result) {
