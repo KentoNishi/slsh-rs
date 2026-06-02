@@ -1,27 +1,7 @@
 use crate::key::KeyIntent;
+use crate::predict::{Overlay, OverlayCell, OverlayKind, PredictorPlugin};
 use crate::screen::{ActiveBuffer, Cell, Color, Cursor, Screen};
 use unicode_width::UnicodeWidthChar;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Overlay {
-    pub enabled: bool,
-    pub cells: Vec<OverlayCell>,
-    pub cursor: Option<Cursor>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct OverlayCell {
-    pub pos: Cursor,
-    pub cell: Cell,
-    pub under: Cell,
-    pub kind: OverlayKind,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OverlayKind {
-    Printable,
-    Deletion { remote_seen: bool },
-}
 
 #[derive(Debug, Clone)]
 pub struct BasePredictor {
@@ -386,6 +366,28 @@ impl BasePredictor {
         {
             self.nonlinear_block = None;
         }
+    }
+}
+
+impl PredictorPlugin for BasePredictor {
+    fn name(&self) -> &'static str {
+        "base"
+    }
+
+    fn overlay(&self) -> &Overlay {
+        &self.overlay
+    }
+
+    fn on_key(&mut self, intent: KeyIntent, screen: &Screen) {
+        BasePredictor::on_key(self, intent, screen);
+    }
+
+    fn reconcile(&mut self, screen: &Screen) {
+        BasePredictor::reconcile(self, screen);
+    }
+
+    fn clear(&mut self) {
+        BasePredictor::clear(self);
     }
 }
 
