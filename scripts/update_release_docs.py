@@ -9,32 +9,32 @@ ASSETS = {
     "slsh-linux-x86_64": {
         "label": "Linux x86_64",
         "shell": "sh",
-        "command": "sudo curl -fsSLo /usr/local/bin/slsh https://github.com/KentoNishi/slsh/releases/latest/download/slsh-linux-x86_64 && echo '{sha}  /usr/local/bin/slsh' | sha256sum -c - && sudo chmod +x /usr/local/bin/slsh",
+        "command": "sudo curl -fsSLo /usr/local/bin/slsh https://github.com/KentoNishi/slsh-rs/releases/latest/download/slsh-linux-x86_64 && echo '{sha}  /usr/local/bin/slsh' | sha256sum -c - && sudo chmod +x /usr/local/bin/slsh",
     },
     "slsh-linux-aarch64": {
         "label": "Linux ARM64",
         "shell": "sh",
-        "command": "sudo curl -fsSLo /usr/local/bin/slsh https://github.com/KentoNishi/slsh/releases/latest/download/slsh-linux-aarch64 && echo '{sha}  /usr/local/bin/slsh' | sha256sum -c - && sudo chmod +x /usr/local/bin/slsh",
+        "command": "sudo curl -fsSLo /usr/local/bin/slsh https://github.com/KentoNishi/slsh-rs/releases/latest/download/slsh-linux-aarch64 && echo '{sha}  /usr/local/bin/slsh' | sha256sum -c - && sudo chmod +x /usr/local/bin/slsh",
     },
     "slsh-macos-x86_64": {
         "label": "macOS x86_64",
         "shell": "sh",
-        "command": "sudo curl -fsSLo /usr/local/bin/slsh https://github.com/KentoNishi/slsh/releases/latest/download/slsh-macos-x86_64 && echo '{sha}  /usr/local/bin/slsh' | shasum -a 256 -c - && sudo chmod +x /usr/local/bin/slsh",
+        "command": "sudo curl -fsSLo /usr/local/bin/slsh https://github.com/KentoNishi/slsh-rs/releases/latest/download/slsh-macos-x86_64 && echo '{sha}  /usr/local/bin/slsh' | shasum -a 256 -c - && sudo chmod +x /usr/local/bin/slsh",
     },
     "slsh-macos-aarch64": {
         "label": "macOS ARM64",
         "shell": "sh",
-        "command": "sudo curl -fsSLo /usr/local/bin/slsh https://github.com/KentoNishi/slsh/releases/latest/download/slsh-macos-aarch64 && echo '{sha}  /usr/local/bin/slsh' | shasum -a 256 -c - && sudo chmod +x /usr/local/bin/slsh",
+        "command": "sudo curl -fsSLo /usr/local/bin/slsh https://github.com/KentoNishi/slsh-rs/releases/latest/download/slsh-macos-aarch64 && echo '{sha}  /usr/local/bin/slsh' | shasum -a 256 -c - && sudo chmod +x /usr/local/bin/slsh",
     },
     "slsh-windows-x86_64.exe": {
         "label": "Windows x86_64 (PowerShell)",
         "shell": "powershell",
-        "command": "iwr https://github.com/KentoNishi/slsh/releases/latest/download/slsh-windows-x86_64.exe -OutFile $env:LOCALAPPDATA\\Microsoft\\WindowsApps\\slsh.exe; if((Get-FileHash $env:LOCALAPPDATA\\Microsoft\\WindowsApps\\slsh.exe).Hash -ine '{sha}'){{exit 1}}",
+        "command": "iwr https://github.com/KentoNishi/slsh-rs/releases/latest/download/slsh-windows-x86_64.exe -OutFile $env:LOCALAPPDATA\\Microsoft\\WindowsApps\\slsh.exe; if((Get-FileHash $env:LOCALAPPDATA\\Microsoft\\WindowsApps\\slsh.exe).Hash -ine '{sha}'){{exit 1}}",
     },
     "slsh-windows-aarch64.exe": {
         "label": "Windows ARM64 (PowerShell)",
         "shell": "powershell",
-        "command": "iwr https://github.com/KentoNishi/slsh/releases/latest/download/slsh-windows-aarch64.exe -OutFile $env:LOCALAPPDATA\\Microsoft\\WindowsApps\\slsh.exe; if((Get-FileHash $env:LOCALAPPDATA\\Microsoft\\WindowsApps\\slsh.exe).Hash -ine '{sha}'){{exit 1}}",
+        "command": "iwr https://github.com/KentoNishi/slsh-rs/releases/latest/download/slsh-windows-aarch64.exe -OutFile $env:LOCALAPPDATA\\Microsoft\\WindowsApps\\slsh.exe; if((Get-FileHash $env:LOCALAPPDATA\\Microsoft\\WindowsApps\\slsh.exe).Hash -ine '{sha}'){{exit 1}}",
     },
 }
 
