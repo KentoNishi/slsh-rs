@@ -13,7 +13,7 @@ use crossterm::execute;
 use crossterm::style::ResetColor;
 use crossterm::terminal;
 use input::InputEvent;
-use predict::{BasePredictor, Overlay};
+use predict::Overlay;
 use render::Renderer;
 use screen::{ActiveBuffer, Screen, Size};
 use ssh_args::{LaunchMode, ParsedSshArgs};
@@ -73,7 +73,7 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
     };
     let mut screen = Screen::new_at(size, initial_terminal_cursor(size));
     let mut parser = vte::Parser::new();
-    let mut predictor = BasePredictor::new(parsed.slsh.predict);
+    let mut predictor = predict::default_predictor(parsed.slsh.predict);
     let mut renderer = Renderer::new();
     let mut transport = if Transport::loopback_enabled() {
         Transport::spawn_loopback(&parsed.remote_command, cols.max(1), rows.max(1))?
@@ -83,6 +83,7 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
     let mut terminal_guard = TerminalGuard::enter()?;
     let mut stdout = io::stdout();
     let mut key_trace = KeyTrace::from_env();
+    key_trace.log(format_args!("predictor {}", predictor.name()));
     let mut pressed_keys = HashSet::new();
     let mut raw_synced = true;
     #[cfg(not(windows))]
@@ -121,15 +122,15 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
                 if left_alternate {
                     screen.reset_style();
                 }
-                renderer.sync_to_terminal(&screen, &predictor.overlay);
+                renderer.sync_to_terminal(&screen, predictor.overlay());
                 raw_synced = true;
                 dirty = false;
-            } else if raw_synced && predictor.overlay.cells.is_empty() {
+            } else if raw_synced && predictor.overlay().cells.is_empty() {
                 stdout
                     .write_all(&chunk)
                     .context("failed to render ssh output")?;
                 stdout.flush().context("failed to flush ssh output")?;
-                renderer.sync_to_terminal(&screen, &predictor.overlay);
+                renderer.sync_to_terminal(&screen, predictor.overlay());
             } else {
                 dirty = true;
             }
@@ -161,8 +162,8 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
                         key_trace.log(format_args!(
                             "predict cursor {:?} overlay {} overlay_cursor {:?}",
                             screen.cursor(),
-                            predictor.overlay.cells.len(),
-                            predictor.overlay.cursor
+                            predictor.overlay().cells.len(),
+                            predictor.overlay().cursor
                         ));
                         dirty = true;
                     }
@@ -209,18 +210,18 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
         }
 
         if dirty {
-            let output = renderer.render(&screen, &predictor.overlay);
+            let output = renderer.render(&screen, predictor.overlay());
             key_trace.log(format_args!("render bytes {}", output.len()));
             stdout
                 .write_all(output.as_bytes())
                 .context("failed to render terminal")?;
             stdout.flush().context("failed to flush terminal")?;
-            raw_synced = predictor.overlay.cells.is_empty();
+            raw_synced = predictor.overlay().cells.is_empty();
         }
 
         if let Some(status) = transport.try_wait()? {
             terminal_guard
-                .leave_after_screen(&mut stdout, &screen, &predictor.overlay)
+                .leave_after_screen(&mut stdout, &screen, predictor.overlay())
                 .context("failed to restore terminal")?;
             return Ok(transport::pty_exit_code(status));
         }
