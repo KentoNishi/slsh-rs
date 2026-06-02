@@ -10,6 +10,11 @@ on:
         description: Release tag to upload assets to. Defaults to the latest prerelease.
         required: false
         type: string
+      reuse_assets:
+        description: Reuse existing release assets and only update docs/tag.
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -58,6 +63,7 @@ jobs:
   build:
     name: ${{ matrix.name }}
     needs: resolve-release
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.reuse_assets }}
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -127,6 +133,7 @@ jobs:
     needs:
       - resolve-release
       - build
+    if: ${{ always() && needs.resolve-release.result == 'success' && (needs.build.result == 'success' || needs.build.result == 'skipped') }}
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout release branch
@@ -136,9 +143,24 @@ jobs:
           ref: master
 
       - name: Download binaries
+        if: ${{ needs.build.result == 'success' }}
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+
+      - name: Download existing release assets
+        if: ${{ needs.build.result == 'skipped' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.resolve-release.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p artifacts/existing
+          gh release download "${RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --dir artifacts/existing \
+            --pattern 'slsh-*'
 
       - name: Create checksums
         run: |
@@ -172,6 +194,7 @@ jobs:
           git push --force origin "refs/tags/${RELEASE_TAG}"
 
       - name: Upload release assets
+        if: ${{ needs.build.result == 'success' }}
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.resolve-release.outputs.tag }}
