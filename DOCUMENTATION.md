@@ -66,7 +66,7 @@ Windows ARM64 (PowerShell):
 iwr https://github.com/KentoNishi/slsh/releases/latest/download/slsh-windows-aarch64.exe -OutFile $env:LOCALAPPDATA\Microsoft\WindowsApps\slsh.exe; if((Get-FileHash $env:LOCALAPPDATA\Microsoft\WindowsApps\slsh.exe).Hash -ine '0000000000000000000000000000000000000000000000000000000000000000'){exit 1}
 ```
 
-Each command downloads the latest release asset, checks its hardcoded SHA-256, and installs `slsh` into the platform PATH.
+Each command downloads the latest release asset, checks its SHA-256, and installs `slsh` into the platform PATH.
 
 <!-- INSTALL-COMMANDS:END -->
 
