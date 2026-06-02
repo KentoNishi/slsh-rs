@@ -1,4 +1,4 @@
-name: terminal smoke
+name: terminal tests
 
 on:
   workflow_call:
@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: terminal-smoke-${{ github.repository }}-${{ github.ref }}
+  group: terminal-tests-${{ github.repository }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -32,7 +32,7 @@ jobs:
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: terminal-smoke-linux
+          shared-key: terminal-tests-linux
 
       - name: Install sshd
         run: |
@@ -43,13 +43,13 @@ jobs:
       - name: Unit tests
         run: cargo test --locked
 
-      - name: Loopback compositor smoke
+      - name: Loopback compositor test
         run: python3 scripts/smoke_loopback.py
 
-      - name: Fake ssh PTY smoke
+      - name: Fake ssh PTY test
         run: python3 scripts/smoke_local_pty.py
 
-      - name: Local sshd smoke
+      - name: Local sshd test
         run: python3 scripts/smoke_local_sshd.py
 
   macos:
@@ -77,15 +77,15 @@ jobs:
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: terminal-smoke-${{ matrix.runner }}
+          shared-key: terminal-tests-${{ matrix.runner }}
 
       - name: Unit tests
         run: cargo test --locked
 
-      - name: Loopback compositor smoke
+      - name: Loopback compositor test
         run: python3 scripts/smoke_loopback.py
 
-      - name: Fake ssh PTY smoke
+      - name: Fake ssh PTY test
         run: python3 scripts/smoke_local_pty.py
 
   windows:
@@ -114,7 +114,7 @@ jobs:
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: terminal-smoke-${{ matrix.runner }}
+          shared-key: terminal-tests-${{ matrix.runner }}
 
       - name: Unit tests
         shell: bash
@@ -124,7 +124,7 @@ jobs:
         shell: bash
         run: cargo build --release --locked
 
-      - name: ConPTY harness self-test
+      - name: ConPTY harness test
         shell: pwsh
         run: ./scripts/smoke_windows_conpty.ps1 -SelfTest
 
@@ -179,6 +179,6 @@ jobs:
           "WT_EXE=$($exe.FullName)" >> $env:GITHUB_ENV
           & $exe.FullName --version
 
-      - name: Windows Terminal PowerShell loopback smoke
+      - name: Windows Terminal PowerShell loopback test
         shell: pwsh
         run: ./scripts/smoke_windows_terminal.ps1 -SlshExe target/release/slsh.exe -HostName ignored-host -LoopbackPowerShell

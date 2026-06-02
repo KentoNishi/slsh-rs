@@ -24,13 +24,13 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  terminal-smoke:
-    name: terminal smoke
-    uses: ./.github/workflows/terminal-smoke.yml
+  terminal-tests:
+    name: terminal tests
+    uses: ./.github/workflows/terminal-tests.yml
 
   resolve-release:
     name: resolve release
-    needs: terminal-smoke
+    needs: terminal-tests
     runs-on: ubuntu-24.04
     outputs:
       tag: ${{ steps.release.outputs.tag }}
