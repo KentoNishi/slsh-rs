@@ -155,18 +155,6 @@ impl Screen {
         self.clamp_cursor();
     }
 
-    pub fn visible_text_tail(&self, rows: u16) -> String {
-        let start = self.size.rows.saturating_sub(rows);
-        let mut text = String::new();
-        for row in start..self.size.rows {
-            for col in 0..self.size.cols {
-                text.push(self.cell(Cursor { row, col }).ch);
-            }
-            text.push('\n');
-        }
-        text
-    }
-
     pub fn cells(&self) -> &[Cell] {
         &self.buffer().cells
     }

@@ -568,17 +568,27 @@ fn cursor_index(cursor: Cursor, screen: &Screen) -> u32 {
 }
 
 pub fn hidden_input_guard(screen: &Screen) -> bool {
-    let tail = screen.visible_text_tail(3).to_ascii_lowercase();
-    [
-        "password",
-        "passphrase",
-        "secret",
-        "token",
-        "sudo",
-        "login:",
-    ]
-    .iter()
-    .any(|needle| tail.contains(needle))
+    let line = current_line_before_cursor(screen).to_ascii_lowercase();
+    ["password", "passphrase", "secret", "token"]
+        .iter()
+        .any(|needle| line.contains(needle))
+        || line.trim_start().starts_with("login:")
+}
+
+fn current_line_before_cursor(screen: &Screen) -> String {
+    let cursor = screen.cursor();
+    let mut line = String::new();
+    for col in 0..cursor.col {
+        line.push(
+            screen
+                .cell(Cursor {
+                    row: cursor.row,
+                    col,
+                })
+                .ch,
+        );
+    }
+    line
 }
 
 fn command_submit_context(screen: &Screen) -> bool {
@@ -670,6 +680,40 @@ mod tests {
         assert_eq!(predictor.overlay.cells[0].pos, Cursor { row: 0, col: 2 });
         assert_eq!(predictor.overlay.cells[0].cell.ch, 'a');
         assert!(predictor.overlay.cells[0].cell.style.dim);
+    }
+
+    #[test]
+    fn last_login_above_prompt_does_not_suppress_prediction() {
+        let screen = screen_with_size(
+            Size { cols: 60, rows: 4 },
+            b"Last login: Tue Jun 23 01:45:42 2026\r\n$ ",
+        );
+        let mut predictor = BasePredictor::new(true);
+
+        predictor.on_key(KeyIntent::Printable('e'), &screen);
+
+        assert_eq!(predictor.overlay.cells.len(), 1);
+        assert_eq!(predictor.overlay.cells[0].cell.ch, 'e');
+    }
+
+    #[test]
+    fn active_login_prompt_suppresses_prediction() {
+        let screen = screen_with(b"login: ");
+        let mut predictor = BasePredictor::new(true);
+
+        predictor.on_key(KeyIntent::Printable('s'), &screen);
+
+        assert!(predictor.overlay.cells.is_empty());
+    }
+
+    #[test]
+    fn active_password_prompt_suppresses_prediction() {
+        let screen = screen_with(b"Password: ");
+        let mut predictor = BasePredictor::new(true);
+
+        predictor.on_key(KeyIntent::Printable('s'), &screen);
+
+        assert!(predictor.overlay.cells.is_empty());
     }
 
     #[test]
