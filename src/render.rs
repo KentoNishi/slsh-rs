@@ -6,6 +6,7 @@ pub struct Frame {
     pub size: Size,
     pub cells: Vec<Cell>,
     pub cursor: Cursor,
+    pub native_cursor_visible: bool,
 }
 
 #[derive(Debug, Default)]
@@ -42,7 +43,9 @@ impl Renderer {
         if !output.is_empty() {
             output.insert_str(0, "\x1b[?25l");
             set_style(&mut output, screen.style());
-            output.push_str("\x1b[?25h");
+            if next.native_cursor_visible {
+                output.push_str("\x1b[?25h");
+            }
         }
         self.last = Some(next);
         self.force_full = false;
@@ -59,11 +62,20 @@ pub fn compose_frame(screen: &Screen, overlay: &Overlay) -> Frame {
             *cell = overlay_cell.cell;
         }
     }
+    let cursor = overlay.cursor.unwrap_or_else(|| screen.cursor());
+    let native_cursor_visible = overlay.cursor.is_none();
+    if !native_cursor_visible {
+        let index = cursor.row as usize * screen.size().cols as usize + cursor.col as usize;
+        if let Some(cell) = cells.get_mut(index) {
+            cell.style.reverse = true;
+        }
+    }
 
     Frame {
         size: screen.size(),
         cells,
-        cursor: overlay.cursor.unwrap_or_else(|| screen.cursor()),
+        cursor,
+        native_cursor_visible,
     }
 }
 
@@ -223,6 +235,26 @@ mod tests {
         let mut parser = vte::Parser::new();
         screen.feed(&mut parser, text);
         screen
+    }
+
+    fn printable(pos: Cursor, ch: char) -> OverlayCell {
+        OverlayCell {
+            pos,
+            cell: Cell {
+                ch,
+                style: Default::default(),
+            },
+            under: Cell::default(),
+            kind: OverlayKind::Printable,
+        }
+    }
+
+    fn overlay(cells: Vec<OverlayCell>, cursor: Option<Cursor>) -> Overlay {
+        Overlay {
+            enabled: true,
+            cells,
+            cursor,
+        }
     }
 
     #[test]
@@ -407,6 +439,82 @@ mod tests {
 
         assert_eq!(frame.cells[0].ch, 'x');
         assert_eq!(frame.cursor, Cursor { row: 0, col: 1 });
+    }
+
+    #[test]
+    fn overlay_cursor_draws_software_cursor() {
+        let screen = screen_with(b"$ ");
+        let overlay = overlay(
+            vec![printable(Cursor { row: 0, col: 2 }, 'a')],
+            Some(Cursor { row: 0, col: 3 }),
+        );
+
+        let frame = compose_frame(&screen, &overlay);
+
+        assert_eq!(frame.cursor, Cursor { row: 0, col: 3 });
+        assert!(!frame.native_cursor_visible);
+        assert!(frame.cells[3].style.reverse);
+    }
+
+    #[test]
+    fn pending_overlay_hides_native_cursor() {
+        let screen = screen_with(b"$ ");
+        let overlay = overlay(
+            vec![printable(Cursor { row: 0, col: 2 }, 'a')],
+            Some(Cursor { row: 0, col: 3 }),
+        );
+        let mut renderer = Renderer::new();
+
+        let out = renderer.render(&screen, &overlay);
+
+        assert!(out.contains("\x1b[?25l"));
+        assert!(!out.contains("\x1b[?25h"));
+        assert!(out.contains("\x1b[7m"));
+    }
+
+    #[test]
+    fn pending_overlay_moves_software_cursor_without_showing_native_cursor() {
+        let screen = screen_with(b"$ ");
+        let mut renderer = Renderer::new();
+        renderer.render(
+            &screen,
+            &overlay(
+                vec![printable(Cursor { row: 0, col: 2 }, 'a')],
+                Some(Cursor { row: 0, col: 3 }),
+            ),
+        );
+
+        let out = renderer.render(
+            &screen,
+            &overlay(
+                vec![
+                    printable(Cursor { row: 0, col: 2 }, 'a'),
+                    printable(Cursor { row: 0, col: 3 }, 'b'),
+                ],
+                Some(Cursor { row: 0, col: 4 }),
+            ),
+        );
+
+        assert!(out.contains('b'));
+        assert!(out.contains("\x1b[?25l"));
+        assert!(!out.contains("\x1b[?25h"));
+    }
+
+    #[test]
+    fn native_cursor_returns_when_overlay_clears() {
+        let screen = screen_with(b"$ ");
+        let mut renderer = Renderer::new();
+        renderer.render(
+            &screen,
+            &overlay(
+                vec![printable(Cursor { row: 0, col: 2 }, 'a')],
+                Some(Cursor { row: 0, col: 3 }),
+            ),
+        );
+
+        let out = renderer.render(&screen, &overlay(Vec::new(), None));
+
+        assert!(out.contains("\x1b[?25h"));
     }
 
     #[test]
