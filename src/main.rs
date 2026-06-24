@@ -92,34 +92,29 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
     loop {
         let mut dirty = false;
 
-        for chunk in transport.drain_chunks() {
-            let before_active = screen.active();
-            let before_application_cursor = screen.application_cursor_keys();
-            for byte in &chunk {
-                screen.feed(&mut parser, std::slice::from_ref(byte));
-                predictor.reconcile(&screen);
+        let chunks = transport.drain_chunks();
+        if !chunks.is_empty() {
+            let mut remote_output = Vec::new();
+            for chunk in chunks {
+                remote_output.extend_from_slice(&chunk);
             }
+
+            let remote_update =
+                apply_remote_bytes(&remote_output, &mut screen, &mut parser, predictor.as_mut());
             #[cfg(not(windows))]
-            mouse_protocol.feed(&chunk);
-            let left_alternate = (before_active == ActiveBuffer::Alternate
-                && screen.active() == ActiveBuffer::Primary)
-                || contains_alternate_exit(&chunk);
-            let terminal_mode_changed = left_alternate
-                || before_active != screen.active()
-                || before_application_cursor != screen.application_cursor_keys()
-                || contains_terminal_mode_change(&chunk);
-            if terminal_mode_changed {
+            mouse_protocol.feed(&remote_output);
+            if remote_update.terminal_mode_changed {
                 stdout
-                    .write_all(&chunk)
+                    .write_all(&remote_output)
                     .context("failed to render ssh output")?;
-                if left_alternate {
+                if remote_update.left_alternate {
                     stdout
                         .write_all(b"\x1b[0m")
                         .context("failed to reset terminal style")?;
                 }
                 stdout.flush().context("failed to flush ssh output")?;
                 predictor.clear();
-                if left_alternate {
+                if remote_update.left_alternate {
                     screen.reset_style();
                 }
                 renderer.sync_to_terminal(&screen, predictor.overlay());
@@ -127,7 +122,7 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
                 dirty = false;
             } else if raw_synced && predictor.overlay().cells.is_empty() {
                 stdout
-                    .write_all(&chunk)
+                    .write_all(&remote_output)
                     .context("failed to render ssh output")?;
                 stdout.flush().context("failed to flush ssh output")?;
                 renderer.sync_to_terminal(&screen, predictor.overlay());
@@ -229,6 +224,39 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
         if !dirty {
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RemoteUpdate {
+    left_alternate: bool,
+    terminal_mode_changed: bool,
+}
+
+fn apply_remote_bytes(
+    bytes: &[u8],
+    screen: &mut Screen,
+    parser: &mut vte::Parser,
+    predictor: &mut dyn predict::PredictorPlugin,
+) -> RemoteUpdate {
+    let before_active = screen.active();
+    let before_application_cursor = screen.application_cursor_keys();
+    for byte in bytes {
+        screen.feed(parser, std::slice::from_ref(byte));
+    }
+    predictor.reconcile(screen);
+
+    let left_alternate = (before_active == ActiveBuffer::Alternate
+        && screen.active() == ActiveBuffer::Primary)
+        || contains_alternate_exit(bytes);
+    let terminal_mode_changed = left_alternate
+        || before_active != screen.active()
+        || before_application_cursor != screen.application_cursor_keys()
+        || contains_terminal_mode_change(bytes);
+
+    RemoteUpdate {
+        left_alternate,
+        terminal_mode_changed,
     }
 }
 
@@ -607,6 +635,30 @@ mod tests {
         assert!(contains_terminal_mode_change(b"abc\x1b[?1002l"));
         assert!(!contains_terminal_mode_change(b"\x1b[31mred"));
         assert!(!contains_terminal_mode_change(b"\x1b[?25l"));
+    }
+
+    #[test]
+    fn remote_repaint_burst_reconciles_after_final_screen_state() {
+        let mut screen = Screen::new(Size { cols: 20, rows: 3 });
+        let mut parser = vte::Parser::new();
+        screen.feed(&mut parser, b"$ ");
+        let mut predictor = predict::BasePredictor::new(true);
+        predictor.on_key(key::KeyIntent::Printable('a'), &screen);
+
+        let update = apply_remote_bytes(
+            b"\x1b[H\x1b[2J\x1b[1;1H$ \x1b[1;3H",
+            &mut screen,
+            &mut parser,
+            &mut predictor,
+        );
+
+        assert!(!update.terminal_mode_changed);
+        assert_eq!(predictor.overlay.cells.len(), 1);
+        assert_eq!(predictor.overlay.cells[0].cell.ch, 'a');
+        assert_eq!(
+            predictor.overlay.cursor,
+            Some(screen::Cursor { row: 0, col: 3 })
+        );
     }
 
     #[test]

@@ -1546,6 +1546,21 @@ mod tests {
     }
 
     #[test]
+    fn full_repaint_burst_keeps_unconfirmed_overlay_at_returned_cursor() {
+        let mut screen = screen_with(b"$ ");
+        let mut predictor = BasePredictor::new(true);
+
+        predictor.on_key(KeyIntent::Printable('a'), &screen);
+        feed(&mut screen, b"\x1b[H\x1b[2J\x1b[1;1H$ \x1b[1;3H");
+        predictor.reconcile(&screen);
+
+        assert_eq!(predictor.overlay.cells.len(), 1);
+        assert_eq!(predictor.overlay.cells[0].cell.ch, 'a');
+        assert_eq!(predictor.overlay.cells[0].pos, Cursor { row: 0, col: 2 });
+        assert_eq!(predictor.overlay.cursor, Some(Cursor { row: 0, col: 3 }));
+    }
+
+    #[test]
     fn partial_remote_echo_keeps_remaining_overlay() {
         let mut screen = screen_with(b"$ ");
         let mut predictor = BasePredictor::new(true);

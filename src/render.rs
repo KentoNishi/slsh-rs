@@ -501,6 +501,23 @@ mod tests {
     }
 
     #[test]
+    fn repaint_diff_preserves_pending_software_cursor() {
+        let mut renderer = Renderer::new();
+        let overlay = overlay(
+            vec![printable(Cursor { row: 0, col: 2 }, 'a')],
+            Some(Cursor { row: 0, col: 3 }),
+        );
+        renderer.render(&screen_with(b"$  z"), &overlay);
+
+        let out = renderer.render(&screen_with(b"\x1b[H\x1b[2J$ "), &overlay);
+
+        assert!(!out.contains("\x1b[2J"));
+        assert!(out.contains("\x1b[?25l"));
+        assert!(!out.contains("\x1b[?25h"));
+        assert!(out.contains("\x1b[7m"));
+    }
+
+    #[test]
     fn native_cursor_returns_when_overlay_clears() {
         let screen = screen_with(b"$ ");
         let mut renderer = Renderer::new();
