@@ -23,13 +23,14 @@ use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::{self, IsTerminal, Write};
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use transport::Transport;
 
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
-#[cfg(unix)]
-use std::time::Instant;
+
+const REMOTE_REPAINT_QUIET: Duration = Duration::from_millis(16);
+const REMOTE_REPAINT_MAX: Duration = Duration::from_millis(50);
 
 fn main() {
     let code = match run() {
@@ -86,18 +87,16 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
     key_trace.log(format_args!("predictor {}", predictor.name()));
     let mut pressed_keys = HashSet::new();
     let mut raw_synced = true;
+    let mut remote_coalescer = RemoteCoalescer::default();
     #[cfg(not(windows))]
     let mut mouse_protocol = key::MouseProtocol::default();
 
     loop {
         let mut dirty = false;
 
-        let chunks = transport.drain_chunks();
-        if !chunks.is_empty() {
-            let mut remote_output = Vec::new();
-            for chunk in chunks {
-                remote_output.extend_from_slice(&chunk);
-            }
+        remote_coalescer.push(transport.drain_chunks(), Instant::now());
+        if remote_coalescer.ready(Instant::now(), overlay_pending(predictor.overlay())) {
+            let remote_output = remote_coalescer.take();
 
             let remote_update =
                 apply_remote_bytes(&remote_output, &mut screen, &mut parser, predictor.as_mut());
@@ -215,6 +214,15 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
         }
 
         if let Some(status) = transport.try_wait()? {
+            if !remote_coalescer.is_empty() {
+                let remote_output = remote_coalescer.take();
+                apply_remote_bytes(&remote_output, &mut screen, &mut parser, predictor.as_mut());
+                let output = renderer.render(&screen, predictor.overlay());
+                stdout
+                    .write_all(output.as_bytes())
+                    .context("failed to render terminal")?;
+                stdout.flush().context("failed to flush terminal")?;
+            }
             terminal_guard
                 .leave_after_screen(&mut stdout, &screen, predictor.overlay())
                 .context("failed to restore terminal")?;
@@ -231,6 +239,56 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
 struct RemoteUpdate {
     left_alternate: bool,
     terminal_mode_changed: bool,
+}
+
+#[derive(Debug, Default)]
+struct RemoteCoalescer {
+    bytes: Vec<u8>,
+    first_at: Option<Instant>,
+    last_at: Option<Instant>,
+}
+
+impl RemoteCoalescer {
+    fn push(&mut self, chunks: Vec<Vec<u8>>, now: Instant) {
+        for chunk in chunks {
+            if chunk.is_empty() {
+                continue;
+            }
+            if self.bytes.is_empty() {
+                self.first_at = Some(now);
+            }
+            self.last_at = Some(now);
+            self.bytes.extend_from_slice(&chunk);
+        }
+    }
+
+    fn ready(&self, now: Instant, overlay_pending: bool) -> bool {
+        if self.bytes.is_empty() {
+            return false;
+        }
+        if !overlay_pending {
+            return true;
+        }
+        self.last_at
+            .is_some_and(|last_at| now.duration_since(last_at) >= REMOTE_REPAINT_QUIET)
+            || self
+                .first_at
+                .is_some_and(|first_at| now.duration_since(first_at) >= REMOTE_REPAINT_MAX)
+    }
+
+    fn take(&mut self) -> Vec<u8> {
+        self.first_at = None;
+        self.last_at = None;
+        std::mem::take(&mut self.bytes)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+}
+
+fn overlay_pending(overlay: &Overlay) -> bool {
+    !overlay.cells.is_empty() || overlay.cursor.is_some()
 }
 
 fn apply_remote_bytes(
@@ -659,6 +717,42 @@ mod tests {
             predictor.overlay.cursor,
             Some(screen::Cursor { row: 0, col: 3 })
         );
+    }
+
+    #[test]
+    fn remote_coalescer_flushes_immediately_without_overlay() {
+        let now = Instant::now();
+        let mut coalescer = RemoteCoalescer::default();
+
+        coalescer.push(vec![b"abc".to_vec()], now);
+
+        assert!(coalescer.ready(now, false));
+        assert_eq!(coalescer.take(), b"abc");
+        assert!(coalescer.is_empty());
+    }
+
+    #[test]
+    fn remote_coalescer_waits_for_quiet_while_overlay_pending() {
+        let now = Instant::now();
+        let mut coalescer = RemoteCoalescer::default();
+
+        coalescer.push(vec![b"clear".to_vec()], now);
+        assert!(!coalescer.ready(now + REMOTE_REPAINT_QUIET / 2, true));
+        coalescer.push(vec![b"draw".to_vec()], now + REMOTE_REPAINT_QUIET / 2);
+
+        assert!(!coalescer.ready(now + REMOTE_REPAINT_QUIET, true));
+        assert!(coalescer.ready(now + REMOTE_REPAINT_QUIET * 2, true));
+        assert_eq!(coalescer.take(), b"cleardraw");
+    }
+
+    #[test]
+    fn remote_coalescer_caps_wait_while_overlay_pending() {
+        let now = Instant::now();
+        let mut coalescer = RemoteCoalescer::default();
+
+        coalescer.push(vec![b"frame".to_vec()], now);
+
+        assert!(coalescer.ready(now + REMOTE_REPAINT_MAX, true));
     }
 
     #[test]

@@ -38,6 +38,7 @@ def main() -> int:
     scrolled_overlay_output = run_scrolled_overlay()
     app_prefix_output = run_app_prefix_guard()
     app_cursor_output = run_app_cursor_overlay()
+    split_repaint_output = run_split_repaint_overlay()
     mouse_sgr_output = run_mouse_forwarding(True)
     mouse_x10_output = run_mouse_forwarding(False)
 
@@ -60,6 +61,8 @@ def main() -> int:
         failed.append("nonlinear prefix suppresses next printable overlay")
     if b"Z" not in app_cursor_output or b"\x1b[2;1H" not in app_cursor_output:
         failed.append("app cursor overlay row")
+    if b"SPLIT" not in split_repaint_output:
+        failed.append("split repaint keeps predicted text")
     if b"SLSHMOUSEOK" not in mouse_sgr_output:
         failed.append("SGR mouse forwarding")
     if b"SLSHMOUSEOK" not in mouse_x10_output:
@@ -83,6 +86,8 @@ def main() -> int:
         sys.stderr.buffer.write(app_prefix_output)
         sys.stderr.write("\nApp cursor bytes:\n")
         sys.stderr.buffer.write(app_cursor_output)
+        sys.stderr.write("\nSplit repaint bytes:\n")
+        sys.stderr.buffer.write(split_repaint_output)
         sys.stderr.write("\nSGR mouse bytes:\n")
         sys.stderr.buffer.write(mouse_sgr_output)
         sys.stderr.write("\nX10 mouse bytes:\n")
@@ -466,6 +471,76 @@ def run_mouse_forwarding(sgr: bool) -> bytes:
             pass
 
     return output
+
+
+def run_split_repaint_overlay() -> bytes:
+    app = (
+        "import os,sys,tty,time;"
+        "tty.setraw(0);"
+        "text='';"
+        "sys.stdout.write('\\033[?1049h\\033[H\\033[2JREADY\\r\\n> ');"
+        "sys.stdout.flush();"
+        "\nwhile True:\n"
+        "    data=os.read(0,1)\n"
+        "    if not data or data == b'\\x03': break\n"
+        "    text += data.decode('utf-8', 'ignore')\n"
+        "    sys.stdout.write('\\033[2;1H\\033[2K')\n"
+        "    sys.stdout.flush()\n"
+        "    time.sleep(0.025)\n"
+        "    sys.stdout.write('> ' + text)\n"
+        "    sys.stdout.flush()\n"
+        "    time.sleep(0.025)\n"
+        "    sys.stdout.write('\\033[2;%dH' % (len(text) + 3))\n"
+        "    sys.stdout.flush()\n"
+        "    if text.endswith('SPLIT'):\n"
+        "        time.sleep(0.2)\n"
+        "        break\n"
+        "sys.stdout.write('\\033[?1049lSPLITDONE\\r\\n');"
+        "sys.stdout.flush()"
+    )
+    argv = [os.path.join(ROOT, "target", "debug", "slsh"), "ignored-host", "python3", "-c", app]
+    env = loopback_env("250")
+
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.execvpe(argv[0], argv, env)
+
+    termios.tcflush(fd, termios.TCIOFLUSH)
+    os.set_blocking(fd, False)
+    fcntl_rows_cols(fd, 12, 60)
+
+    output = b""
+    capture = b""
+    sent = False
+    sent_at = 0.0
+    deadline = time.time() + 8
+    try:
+        while time.time() < deadline:
+            readable, _, _ = select.select([fd], [], [], 0.02)
+            if readable:
+                try:
+                    chunk = os.read(fd, 4096)
+                    output += chunk
+                    if sent:
+                        capture += chunk
+                except BlockingIOError:
+                    pass
+                except OSError:
+                    return capture
+
+            if not sent and b"READY" in output:
+                os.write(fd, b"SPLIT")
+                sent = True
+                sent_at = time.time()
+            if sent and time.time() - sent_at >= 0.4:
+                return capture
+    finally:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+
+    return capture
 
 
 def run_and_collect(argv: list[str], env: dict[str, str]) -> bytes:
