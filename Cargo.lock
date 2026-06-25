@@ -423,7 +423,7 @@ dependencies = [
 
 [[package]]
 name = "slsh"
-version = "0.0.1"
+version = "0.0.4"
 dependencies = [
  "anyhow",
  "crossterm",
