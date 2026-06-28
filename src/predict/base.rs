@@ -102,10 +102,13 @@ impl BasePredictor {
                 return;
             }
             self.overlay.cells = suffix;
-            self.retain_owned_overlay_cells();
-            self.edit_anchor = self.overlay.cells.first().map(|cell| cell.pos);
+            self.rebuild_owned_overlay_cells();
         } else {
             self.overlay.cells = kept;
+        }
+        if !self.rebase_printable_overlay(screen) {
+            self.clear();
+            return;
         }
         if self.overlay.cells.is_empty() {
             self.overlay.cursor = None;
@@ -291,14 +294,64 @@ impl BasePredictor {
         suffix
     }
 
-    fn retain_owned_overlay_cells(&mut self) {
-        self.owned.retain(|owned| {
-            self.overlay.cells.iter().any(|cell| {
-                cell.kind == OverlayKind::Printable
-                    && cell.pos == owned.pos
-                    && cell.cell == owned.cell
+    fn rebuild_owned_overlay_cells(&mut self) {
+        self.owned = self
+            .overlay
+            .cells
+            .iter()
+            .filter(|cell| cell.kind == OverlayKind::Printable)
+            .map(|cell| OwnedCell {
+                pos: cell.pos,
+                cell: cell.cell,
             })
-        });
+            .collect();
+    }
+
+    fn rebase_printable_overlay(&mut self, screen: &Screen) -> bool {
+        if self.overlay.cells.is_empty()
+            || self
+                .overlay
+                .cells
+                .iter()
+                .any(|cell| !is_printable_prediction(*cell))
+        {
+            return true;
+        }
+
+        let Some(predicted_cursor) = self.overlay.cursor else {
+            return true;
+        };
+        let cursor = screen.cursor();
+        let remote_index = cursor_index(cursor, screen);
+        let predicted_index = cursor_index(predicted_cursor, screen);
+        if remote_index == predicted_index {
+            return true;
+        }
+        if remote_index > predicted_index {
+            return false;
+        }
+
+        let anchor = self
+            .edit_anchor
+            .or_else(|| self.overlay.cells.first().map(|cell| cell.pos))
+            .unwrap_or(cursor);
+        if remote_index < cursor_index(anchor, screen) {
+            return true;
+        }
+        if !remote_cursor_accepts_suffix(screen, &self.overlay.cells, self.overlay.cursor) {
+            return false;
+        }
+
+        let Some((cells, cursor)) =
+            rebase_printable_cells(screen, &self.overlay.cells, screen.cursor())
+        else {
+            return false;
+        };
+        self.overlay.cells = cells;
+        self.overlay.cursor = Some(cursor);
+        self.edit_anchor = self.overlay.cells.first().map(|cell| cell.pos);
+        self.rebuild_owned_overlay_cells();
+        true
     }
 
     fn validate_owned_span(&mut self, screen: &Screen) {
@@ -403,6 +456,38 @@ fn advance_cursor(screen: &Screen, cursor: Cursor, width: u16) -> Cursor {
             col: 0,
         }
     }
+}
+
+fn rebase_printable_cells(
+    screen: &Screen,
+    cells: &[OverlayCell],
+    mut cursor: Cursor,
+) -> Option<(Vec<OverlayCell>, Cursor)> {
+    let mut rebased = Vec::with_capacity(cells.len());
+    for cell in cells {
+        if !is_printable_prediction(*cell) {
+            return None;
+        }
+        let width = width_of(cell.cell.ch);
+        if width == 0 || width > 2 {
+            return None;
+        }
+        if width == 2 && cursor.col + 1 >= screen.size().cols {
+            cursor.col = 0;
+            cursor.row += 1;
+        }
+        if cursor.row >= screen.size().rows {
+            return None;
+        }
+
+        rebased.push(OverlayCell {
+            pos: cursor,
+            under: screen.cell(cursor),
+            ..*cell
+        });
+        cursor = advance_cursor(screen, cursor, width);
+    }
+    Some((rebased, cursor))
 }
 
 fn width_of(ch: char) -> u16 {
@@ -1465,6 +1550,29 @@ mod tests {
     }
 
     #[test]
+    fn conflicting_prefix_rebases_suffix_to_remote_cursor() {
+        let mut screen = screen_with(b"$ ");
+        let mut predictor = BasePredictor::new(true);
+
+        for ch in "abcdef".chars() {
+            predictor.on_key(KeyIntent::Printable(ch), &screen);
+        }
+        feed(&mut screen, b"abX\x1b[1;5H");
+        predictor.reconcile(&screen);
+
+        assert_eq!(
+            predictor
+                .overlay
+                .cells
+                .iter()
+                .map(|cell| (cell.pos.col, cell.cell.ch))
+                .collect::<Vec<_>>(),
+            vec![(4, 'd'), (5, 'e'), (6, 'f')]
+        );
+        assert_eq!(predictor.overlay.cursor, Some(Cursor { row: 0, col: 7 }));
+    }
+
+    #[test]
     fn conflicting_prefix_keeps_suffix_during_same_line_redraw() {
         let mut screen = screen_with(b"$ ");
         let mut predictor = BasePredictor::new(true);
@@ -1484,6 +1592,39 @@ mod tests {
                 .collect::<String>(),
             "ef"
         );
+        assert_eq!(
+            predictor
+                .overlay
+                .cells
+                .iter()
+                .map(|cell| cell.pos.col)
+                .collect::<Vec<_>>(),
+            vec![6, 7]
+        );
+        assert_eq!(predictor.overlay.cursor, Some(Cursor { row: 0, col: 8 }));
+    }
+
+    #[test]
+    fn remote_cursor_behind_prediction_rebases_unconfirmed_overlay() {
+        let mut screen = screen_with(b"$ ");
+        let mut predictor = BasePredictor::new(true);
+
+        for ch in "abcdef".chars() {
+            predictor.on_key(KeyIntent::Printable(ch), &screen);
+        }
+        feed(&mut screen, b"\x1b[1;5H");
+        predictor.reconcile(&screen);
+
+        assert_eq!(
+            predictor
+                .overlay
+                .cells
+                .iter()
+                .map(|cell| (cell.pos.col, cell.cell.ch))
+                .collect::<Vec<_>>(),
+            vec![(4, 'a'), (5, 'b'), (6, 'c'), (7, 'd'), (8, 'e'), (9, 'f')]
+        );
+        assert_eq!(predictor.overlay.cursor, Some(Cursor { row: 0, col: 10 }));
     }
 
     #[test]
