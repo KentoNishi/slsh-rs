@@ -1,4 +1,4 @@
-use crate::predict::Overlay;
+use crate::predict::{Overlay, OverlayKind};
 use crate::screen::{Cell, Color, Cursor, Screen, Size, Style};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,7 +67,14 @@ pub fn compose_frame(screen: &Screen, overlay: &Overlay) -> Frame {
     if !native_cursor_visible {
         let index = cursor.row as usize * screen.size().cols as usize + cursor.col as usize;
         if let Some(cell) = cells.get_mut(index) {
-            cell.style.reverse = true;
+            if overlay.cells.iter().any(|overlay_cell| {
+                overlay_cell.pos == cursor
+                    && matches!(overlay_cell.kind, OverlayKind::Deletion { .. })
+            }) {
+                cell.style.underline = true;
+            } else {
+                cell.style.reverse = true;
+            }
         }
     }
 
@@ -167,7 +174,16 @@ fn emit_row_span(out: &mut String, frame: &Frame, row: u16, start: u16, end: u16
     set_style(out, frame.cells[first].style);
     for col in start..end {
         let index = row as usize * frame.size.cols as usize + col as usize;
-        out.push(frame.cells[index].ch);
+        push_cell_text(out, frame.cells[index]);
+    }
+}
+
+fn push_cell_text(out: &mut String, cell: Cell) {
+    if cell.style.synthetic_strike {
+        out.push(if cell.ch == ' ' { '·' } else { cell.ch });
+        out.push('\u{0336}');
+    } else {
+        out.push(cell.ch);
     }
 }
 
@@ -246,6 +262,24 @@ mod tests {
             },
             under: Cell::default(),
             kind: OverlayKind::Printable,
+        }
+    }
+
+    fn deletion(pos: Cursor, ch: char) -> OverlayCell {
+        let style = Style {
+            dim: true,
+            strikethrough: true,
+            synthetic_strike: true,
+            ..Style::default()
+        };
+        OverlayCell {
+            pos,
+            cell: Cell { ch, style },
+            under: Cell {
+                ch,
+                style: Default::default(),
+            },
+            kind: OverlayKind::Deletion { remote_seen: false },
         }
     }
 
@@ -454,6 +488,37 @@ mod tests {
         assert_eq!(frame.cursor, Cursor { row: 0, col: 3 });
         assert!(!frame.native_cursor_visible);
         assert!(frame.cells[3].style.reverse);
+    }
+
+    #[test]
+    fn deletion_under_overlay_cursor_stays_struck() {
+        let screen = screen_with(b"$ a");
+        let overlay = overlay(
+            vec![deletion(Cursor { row: 0, col: 2 }, 'a')],
+            Some(Cursor { row: 0, col: 2 }),
+        );
+
+        let frame = compose_frame(&screen, &overlay);
+
+        assert_eq!(frame.cells[2].ch, 'a');
+        assert!(frame.cells[2].style.strikethrough);
+        assert!(frame.cells[2].style.synthetic_strike);
+        assert!(frame.cells[2].style.underline);
+        assert!(!frame.cells[2].style.reverse);
+    }
+
+    #[test]
+    fn deletion_overlay_emits_combining_strike() {
+        let screen = screen_with(b"$ a");
+        let overlay = overlay(
+            vec![deletion(Cursor { row: 0, col: 2 }, 'a')],
+            Some(Cursor { row: 0, col: 2 }),
+        );
+        let mut renderer = Renderer::new();
+
+        let out = renderer.render(&screen, &overlay);
+
+        assert!(out.contains("a\u{0336}"));
     }
 
     #[test]

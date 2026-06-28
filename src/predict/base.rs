@@ -349,7 +349,7 @@ impl BasePredictor {
         };
         self.overlay.cells = cells;
         self.overlay.cursor = Some(cursor);
-        self.edit_anchor = self.overlay.cells.first().map(|cell| cell.pos);
+        self.edit_anchor.get_or_insert(screen.cursor());
         self.rebuild_owned_overlay_cells();
         true
     }
@@ -503,6 +503,7 @@ fn predicted_deletion_style(mut style: crate::screen::Style) -> crate::screen::S
     style.fg = Color::Indexed(8);
     style.dim = true;
     style.strikethrough = true;
+    style.synthetic_strike = true;
     style
 }
 
@@ -1288,6 +1289,37 @@ mod tests {
             "ow and keep going"
         );
         assert!(!predictor.overlay.cells.is_empty());
+    }
+
+    #[test]
+    fn replacement_after_backspace_tracks_remote_cursor_left() {
+        let mut screen = screen_with_size(Size { cols: 80, rows: 5 }, b"$ ");
+        let mut predictor = BasePredictor::new(true);
+
+        for ch in "abcdef".chars() {
+            predictor.on_key(KeyIntent::Printable(ch), &screen);
+        }
+        for _ in 0..3 {
+            predictor.on_key(KeyIntent::Backspace, &screen);
+        }
+        for ch in "XYZ".chars() {
+            predictor.on_key(KeyIntent::Printable(ch), &screen);
+        }
+
+        feed_each_reconcile(&mut screen, &mut predictor, b"abcdef");
+        feed_each_reconcile(&mut screen, &mut predictor, b"\x08 \x08\x08 \x08\x08 \x08");
+
+        assert_eq!(
+            predictor
+                .overlay
+                .cells
+                .iter()
+                .filter(|cell| cell.kind == OverlayKind::Printable)
+                .map(|cell| (cell.pos.col, cell.cell.ch))
+                .collect::<Vec<_>>(),
+            vec![(5, 'X'), (6, 'Y'), (7, 'Z')]
+        );
+        assert_eq!(predictor.overlay.cursor, Some(Cursor { row: 0, col: 8 }));
     }
 
     #[test]

@@ -29,6 +29,7 @@ pub struct Style {
     pub bold: bool,
     pub underline: bool,
     pub strikethrough: bool,
+    pub synthetic_strike: bool,
     pub reverse: bool,
 }
 
