@@ -3,6 +3,7 @@ import fcntl
 import os
 import pty
 import select
+import shutil
 import signal
 import struct
 import subprocess
@@ -42,6 +43,7 @@ def main() -> int:
     split_escape_output = run_split_escape_after_nonlinear_key()
     mouse_sgr_output = run_mouse_forwarding(True)
     mouse_x10_output = run_mouse_forwarding(False)
+    vim_output = run_vim_shell() if shutil.which("vim") else None
 
     failed = []
     if marker not in output:
@@ -72,6 +74,15 @@ def main() -> int:
         failed.append("SGR mouse forwarding")
     if b"SLSHMOUSEOK" not in mouse_x10_output:
         failed.append("X10 mouse forwarding")
+    if vim_output is not None:
+        if b"-- INSERT --" not in vim_output:
+            failed.append("vim insert screen")
+        if b"\x1b[>c" in vim_output:
+            failed.append("vim secondary device query leaked")
+        if b"\x1b]10;?\x07" in vim_output or b"\x1b]11;?\x07" in vim_output:
+            failed.append("vim color query leaked")
+        if vim_output.count(b"\x1b[6n") > 1:
+            failed.append("vim cursor query leaked")
 
     if failed:
         sys.stderr.write("loopback smoke failed: marker missing\n")
@@ -99,6 +110,9 @@ def main() -> int:
         sys.stderr.buffer.write(mouse_sgr_output)
         sys.stderr.write("\nX10 mouse bytes:\n")
         sys.stderr.buffer.write(mouse_x10_output)
+        if vim_output is not None:
+            sys.stderr.write("\nVim bytes:\n")
+            sys.stderr.buffer.write(vim_output)
         sys.stderr.write("\n")
         return 1
 
@@ -613,6 +627,78 @@ def run_split_escape_after_nonlinear_key() -> bytes:
             pass
 
     return capture
+
+
+def run_vim_shell() -> bytes:
+    argv = [os.path.join(ROOT, "target", "debug", "slsh"), "ignored-host"]
+    env = loopback_env("120")
+    env["SHELL"] = "/bin/sh"
+    env["TERM"] = "xterm-256color"
+
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.execvpe(argv[0], argv, env)
+
+    termios.tcflush(fd, termios.TCIOFLUSH)
+    os.set_blocking(fd, False)
+    fcntl_rows_cols(fd, 24, 80)
+
+    output = b""
+    stage = "wait_shell"
+    stage_at = time.time()
+    deadline = time.time() + 12
+    try:
+        while time.time() < deadline:
+            try:
+                waited, _ = os.waitpid(pid, os.WNOHANG)
+            except ChildProcessError:
+                return output
+            if waited == pid:
+                return output
+
+            readable, _, _ = select.select([fd], [], [], 0.02)
+            if readable:
+                try:
+                    output += os.read(fd, 4096)
+                except BlockingIOError:
+                    pass
+                except OSError:
+                    return output
+
+            if stage == "wait_shell" and time.time() - stage_at >= 0.6:
+                command = b"vim -Nu NONE -n -i NONE /tmp/slsh-vim-loopback.txt\r"
+                os.write(fd, b"\x1b[200~" + command + b"\x1b[201~")
+                stage = "wait_vim"
+                stage_at = time.time()
+            elif (
+                stage == "wait_vim"
+                and b"-- INSERT --" not in output
+                and time.time() - stage_at >= 1.4
+            ):
+                os.write(fd, b"i")
+                stage = "insert"
+                stage_at = time.time()
+            elif stage == "insert" and time.time() - stage_at >= 0.4:
+                os.write(fd, b"slsh vim smoke\x1b")
+                stage = "typed"
+                stage_at = time.time()
+            elif stage == "typed" and time.time() - stage_at >= 0.8:
+                os.write(fd, b":q!\r")
+                stage = "quit_vim"
+                stage_at = time.time()
+            elif stage == "quit_vim" and time.time() - stage_at >= 0.8:
+                os.write(fd, b"exit\r")
+                stage = "exit"
+                stage_at = time.time()
+            elif stage == "exit" and time.time() - stage_at >= 0.5:
+                return output
+    finally:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+
+    return output
 
 
 def run_and_collect(argv: list[str], env: dict[str, str]) -> bytes:
