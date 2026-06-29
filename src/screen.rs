@@ -263,7 +263,7 @@ impl Screen {
             let top = self.scroll_top;
             let bottom = self.scroll_bottom;
             let blank = self.blank_cell();
-            self.buffer_mut().scroll_up(size, top, bottom, blank);
+            self.buffer_mut().scroll_up(size, top, bottom, 1, blank);
         } else if self.cursor.row + 1 < self.size.rows {
             self.cursor.row += 1;
         }
@@ -542,6 +542,24 @@ impl Screen {
         }
     }
 
+    fn erase_chars(&mut self, count: u16) {
+        let size = self.size;
+        let cursor = self.cursor;
+        let count = count.min(size.cols.saturating_sub(cursor.col));
+        let blank = self.blank_cell();
+        let buffer = self.buffer_mut();
+        for col in cursor.col..cursor.col + count {
+            buffer.set(
+                size,
+                Cursor {
+                    row: cursor.row,
+                    col,
+                },
+                blank,
+            );
+        }
+    }
+
     fn insert_lines(&mut self, count: u16) {
         let size = self.size;
         let cursor = self.cursor;
@@ -564,6 +582,23 @@ impl Screen {
         let blank = self.blank_cell();
         self.buffer_mut()
             .delete_lines(size, cursor.row, bottom, count, blank);
+    }
+
+    fn scroll_up_lines(&mut self, count: u16) {
+        let size = self.size;
+        let top = self.scroll_top;
+        let bottom = self.scroll_bottom;
+        let blank = self.blank_cell();
+        self.buffer_mut().scroll_up(size, top, bottom, count, blank);
+    }
+
+    fn scroll_down_lines(&mut self, count: u16) {
+        let size = self.size;
+        let top = self.scroll_top;
+        let bottom = self.scroll_bottom;
+        let blank = self.blank_cell();
+        self.buffer_mut()
+            .scroll_down(size, top, bottom, count, blank);
     }
 
     fn blank_cell(&self) -> Cell {
@@ -625,6 +660,9 @@ impl Perform for Screen {
             'M' => self.delete_lines(param(params, 0, 1)),
             '@' => self.insert_blank_chars(param(params, 0, 1)),
             'P' => self.delete_chars(param(params, 0, 1)),
+            'S' => self.scroll_up_lines(param(params, 0, 1)),
+            'T' => self.scroll_down_lines(param(params, 0, 1)),
+            'X' => self.erase_chars(param(params, 0, 1)),
             'm' => self.set_style(params),
             'r' => self.set_scroll_region(
                 param(params, 0, 1).saturating_sub(1),
@@ -737,15 +775,38 @@ impl Buffer {
         }
     }
 
-    fn scroll_up(&mut self, size: Size, top: u16, bottom: u16, blank: Cell) {
-        for row in top..bottom {
+    fn scroll_up(&mut self, size: Size, top: u16, bottom: u16, count: u16, blank: Cell) {
+        let count = count.min(bottom.saturating_sub(top) + 1);
+        for row in top..=bottom.saturating_sub(count) {
             for col in 0..size.cols {
-                let from = Cursor { row: row + 1, col };
+                let from = Cursor {
+                    row: row + count,
+                    col,
+                };
                 let to = Cursor { row, col };
                 self.set(size, to, self.get(size, from));
             }
         }
-        self.clear_row(size, bottom, blank);
+        for row in bottom.saturating_sub(count) + 1..=bottom {
+            self.clear_row(size, row, blank);
+        }
+    }
+
+    fn scroll_down(&mut self, size: Size, top: u16, bottom: u16, count: u16, blank: Cell) {
+        let count = count.min(bottom.saturating_sub(top) + 1);
+        for row in (top + count..=bottom).rev() {
+            for col in 0..size.cols {
+                let from = Cursor {
+                    row: row - count,
+                    col,
+                };
+                let to = Cursor { row, col };
+                self.set(size, to, self.get(size, from));
+            }
+        }
+        for row in top..top + count {
+            self.clear_row(size, row, blank);
+        }
     }
 
     fn insert_lines(&mut self, size: Size, top: u16, bottom: u16, count: u16, blank: Cell) {
@@ -1090,6 +1151,22 @@ mod tests {
     }
 
     #[test]
+    fn erase_chars_clears_stale_colored_cells() {
+        let mut screen = Screen::new(Size { cols: 6, rows: 1 });
+
+        feed(&mut screen, b"\x1b[42mstatus\x1b[0m\x1b[1;1H\x1b[4X");
+
+        for col in 0..4 {
+            assert_eq!(screen.cell(Cursor { row: 0, col }).ch, ' ');
+            assert_eq!(screen.cell(Cursor { row: 0, col }).style.bg, Color::Default);
+        }
+        assert_eq!(
+            screen.cell(Cursor { row: 0, col: 4 }).style.bg,
+            Color::Indexed(2)
+        );
+    }
+
+    #[test]
     fn status_bar_repaint_does_not_leak_style_after_restore() {
         let mut screen = Screen::new(Size { cols: 12, rows: 4 });
 
@@ -1105,6 +1182,60 @@ mod tests {
         for col in 0..screen.size().cols {
             assert_eq!(screen.cell(Cursor { row: 2, col }).style.bg, Color::Default);
         }
+        assert_eq!(
+            screen.cell(Cursor { row: 3, col: 0 }).style.bg,
+            Color::Indexed(2)
+        );
+    }
+
+    #[test]
+    fn scroll_up_respects_region_above_status_bar() {
+        let mut screen = Screen::new(Size { cols: 8, rows: 4 });
+
+        feed(
+            &mut screen,
+            b"one\r\n\
+              two\r\n\
+              three\r\n\
+              \x1b[42mstatus\x1b[0m\
+              \x1b[1;3r\x1b[0m\x1b[S",
+        );
+
+        assert_eq!(screen.cell(Cursor { row: 0, col: 0 }).ch, 't');
+        assert_eq!(screen.cell(Cursor { row: 1, col: 0 }).ch, 't');
+        assert_eq!(screen.cell(Cursor { row: 2, col: 0 }).ch, ' ');
+        assert_eq!(
+            screen.cell(Cursor { row: 2, col: 0 }).style.bg,
+            Color::Default
+        );
+        assert_eq!(screen.cell(Cursor { row: 3, col: 0 }).ch, 's');
+        assert_eq!(
+            screen.cell(Cursor { row: 3, col: 0 }).style.bg,
+            Color::Indexed(2)
+        );
+    }
+
+    #[test]
+    fn scroll_down_respects_region_above_status_bar() {
+        let mut screen = Screen::new(Size { cols: 8, rows: 4 });
+
+        feed(
+            &mut screen,
+            b"one\r\n\
+              two\r\n\
+              three\r\n\
+              \x1b[42mstatus\x1b[0m\
+              \x1b[1;3r\x1b[0m\x1b[T",
+        );
+
+        assert_eq!(screen.cell(Cursor { row: 0, col: 0 }).ch, ' ');
+        assert_eq!(
+            screen.cell(Cursor { row: 0, col: 0 }).style.bg,
+            Color::Default
+        );
+        assert_eq!(screen.cell(Cursor { row: 1, col: 0 }).ch, 'o');
+        assert_eq!(screen.cell(Cursor { row: 2, col: 0 }).ch, 't');
+        assert_eq!(screen.cell(Cursor { row: 3, col: 0 }).ch, 's');
         assert_eq!(
             screen.cell(Cursor { row: 3, col: 0 }).style.bg,
             Color::Indexed(2)
