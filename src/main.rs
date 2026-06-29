@@ -87,6 +87,7 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
     key_trace.log(format_args!("predictor {}", predictor.name()));
     let mut pressed_keys = HashSet::new();
     let mut remote_coalescer = RemoteCoalescer::default();
+    let mut waiting_for_resize_frame = false;
     #[cfg(not(windows))]
     let mut mouse_protocol = key::MouseProtocol::default();
 
@@ -99,6 +100,7 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
 
             let remote_update =
                 apply_remote_bytes(&remote_output, &mut screen, &mut parser, predictor.as_mut());
+            waiting_for_resize_frame = false;
             #[cfg(not(windows))]
             mouse_protocol.feed(&remote_output);
             if remote_update.terminal_mode_changed {
@@ -144,7 +146,11 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
                         if !encoded.bytes.is_empty() {
                             transport.write(&encoded.bytes)?;
                         }
-                        predictor.on_key(encoded.intent, &screen);
+                        if waiting_for_resize_frame {
+                            predictor.clear();
+                        } else {
+                            predictor.on_key(encoded.intent, &screen);
+                        }
                         key_trace.log(format_args!(
                             "predict cursor {:?} overlay {} overlay_cursor {:?}",
                             screen.cursor(),
@@ -164,10 +170,12 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
                     if screen.size() == (Size { cols, rows }) {
                         continue;
                     }
-                    screen.resize(Size { cols, rows });
+                    remote_coalescer.clear();
+                    screen.resize_for_remote_reflow(Size { cols, rows });
                     transport.resize(cols, rows)?;
                     renderer.invalidate();
                     predictor.clear();
+                    waiting_for_resize_frame = true;
                     dirty = true;
                 }
                 #[cfg(not(windows))]
@@ -270,6 +278,12 @@ impl RemoteCoalescer {
         self.first_at = None;
         self.last_at = None;
         std::mem::take(&mut self.bytes)
+    }
+
+    fn clear(&mut self) {
+        self.first_at = None;
+        self.last_at = None;
+        self.bytes.clear();
     }
 
     fn is_empty(&self) -> bool {
@@ -743,6 +757,18 @@ mod tests {
         coalescer.push(vec![b"frame".to_vec()], now);
 
         assert!(coalescer.ready(now + REMOTE_REPAINT_MAX, true));
+    }
+
+    #[test]
+    fn remote_coalescer_clear_drops_stale_resize_bytes() {
+        let now = Instant::now();
+        let mut coalescer = RemoteCoalescer::default();
+
+        coalescer.push(vec![b"old frame".to_vec()], now);
+        coalescer.clear();
+
+        assert!(coalescer.is_empty());
+        assert!(!coalescer.ready(now + REMOTE_REPAINT_MAX, true));
     }
 
     #[test]

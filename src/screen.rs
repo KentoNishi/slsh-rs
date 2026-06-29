@@ -160,6 +160,7 @@ impl Screen {
         parser.advance(self, bytes);
     }
 
+    #[cfg(test)]
     pub fn resize(&mut self, size: Size) {
         self.resize_buffers(size);
         self.clamp_after_resize(size);
@@ -1026,8 +1027,14 @@ mod tests {
 
         feed(&mut screen, b"\x1b[31mA\x1b7\x1b[42mB\x1b8C");
 
-        assert_eq!(screen.cell(Cursor { row: 0, col: 0 }).style.fg, Color::Indexed(1));
-        assert_eq!(screen.cell(Cursor { row: 0, col: 1 }).style.fg, Color::Indexed(1));
+        assert_eq!(
+            screen.cell(Cursor { row: 0, col: 0 }).style.fg,
+            Color::Indexed(1)
+        );
+        assert_eq!(
+            screen.cell(Cursor { row: 0, col: 1 }).style.fg,
+            Color::Indexed(1)
+        );
         assert_eq!(
             screen.cell(Cursor { row: 0, col: 1 }).style.bg,
             Color::Default
@@ -1040,7 +1047,10 @@ mod tests {
 
         feed(&mut screen, b"\x1b[34mA\x1b[s\x1b[42mB\x1b[uC");
 
-        assert_eq!(screen.cell(Cursor { row: 0, col: 1 }).style.fg, Color::Indexed(4));
+        assert_eq!(
+            screen.cell(Cursor { row: 0, col: 1 }).style.fg,
+            Color::Indexed(4)
+        );
         assert_eq!(
             screen.cell(Cursor { row: 0, col: 1 }).style.bg,
             Color::Default
@@ -1075,6 +1085,28 @@ mod tests {
         );
         assert_eq!(
             screen.cell(Cursor { row: 0, col: 3 }).style.bg,
+            Color::Indexed(2)
+        );
+    }
+
+    #[test]
+    fn status_bar_repaint_does_not_leak_style_after_restore() {
+        let mut screen = Screen::new(Size { cols: 12, rows: 4 });
+
+        feed(
+            &mut screen,
+            b"\x1b[2;1Hedit\
+              \x1b7\
+              \x1b[4;1H\x1b[42mstatus\
+              \x1b8\
+              \x1b[3;1H\x1b[K",
+        );
+
+        for col in 0..screen.size().cols {
+            assert_eq!(screen.cell(Cursor { row: 2, col }).style.bg, Color::Default);
+        }
+        assert_eq!(
+            screen.cell(Cursor { row: 3, col: 0 }).style.bg,
             Color::Indexed(2)
         );
     }
@@ -1161,10 +1193,7 @@ mod tests {
     fn resize_reflow_clears_active_layout_content() {
         let mut screen = Screen::new(Size { cols: 10, rows: 4 });
 
-        feed(
-            &mut screen,
-            b"pane\x1b[4;1H\x1b[42mstatus\x1b[0m\x1b[2;1H",
-        );
+        feed(&mut screen, b"pane\x1b[4;1H\x1b[42mstatus\x1b[0m\x1b[2;1H");
 
         assert!(screen.resize_for_remote_reflow(Size { cols: 10, rows: 3 }));
         assert!(screen.cells().iter().all(|cell| *cell == Cell::default()));
