@@ -421,8 +421,23 @@ def run_app_cursor_overlay() -> bytes:
 
 
 def run_mouse_forwarding(sgr: bool) -> bytes:
-    argv = [os.path.join(ROOT, "target", "debug", "slsh"), "ignored-host"]
     env = loopback_env()
+    enable_mouse = "\\033[?1000h\\033[?1006h" if sgr else "\\033[?1000h"
+    disable_mouse = "\\033[?1006l\\033[?1000l" if sgr else "\\033[?1000l"
+    expected = "\\033[<0;10;5M" if sgr else "\\033[M *%"
+    injected = b"\x1b[<0;10;5M" if sgr else b"\x1b[M *%"
+
+    app = (
+        "import os,sys,tty;"
+        "tty.setraw(0);"
+        f"sys.stdout.write(\"\\033[?1049h{enable_mouse}MOUSE_READY\\r\\n\");"
+        "sys.stdout.flush();"
+        "data=os.read(0,32);"
+        f"ok=data.startswith(b\"{expected}\");"
+        f"sys.stdout.write(\"{disable_mouse}\\033[?1049l\" + (\"SLSHMOUSEOK\\n\" if ok else (\"SLSHMOUSEBAD %r\\n\" % (data,))));"
+        "sys.stdout.flush()"
+    )
+    argv = [os.path.join(ROOT, "target", "debug", "slsh"), "ignored-host", "python3", "-c", app]
 
     pid, fd = pty.fork()
     if pid == 0:
@@ -432,24 +447,7 @@ def run_mouse_forwarding(sgr: bool) -> bytes:
     os.set_blocking(fd, False)
     fcntl_rows_cols(fd, 24, 80)
 
-    enable_mouse = "\\033[?1000h\\033[?1006h" if sgr else "\\033[?1000h"
-    disable_mouse = "\\033[?1006l\\033[?1000l" if sgr else "\\033[?1000l"
-    expected = "\\033[<0;10;5M" if sgr else "\\033[M *%"
-    injected = b"\x1b[<0;10;5M" if sgr else b"\x1b[M *%"
-
-    app = (
-        "python3 -c 'import os,sys,tty;"
-        "tty.setraw(0);"
-        f"sys.stdout.write(\"\\033[?1049h{enable_mouse}MOUSE_READY\\r\\n\");"
-        "sys.stdout.flush();"
-        "data=os.read(0,32);"
-        f"ok=data.startswith(b\"{expected}\");"
-        f"sys.stdout.write(\"{disable_mouse}\\033[?1049l\" + (\"SLSHMOUSEOK\\n\" if ok else (\"SLSHMOUSEBAD %r\\n\" % (data,))));"
-        "sys.stdout.flush()'\r"
-    ).encode()
-
     output = b""
-    sent_app = False
     sent_mouse = False
     deadline = time.time() + 12
     try:
@@ -463,10 +461,7 @@ def run_mouse_forwarding(sgr: bool) -> bytes:
                 except OSError:
                     return output
 
-            if not sent_app and (b"$" in output or b"#" in output):
-                os.write(fd, b"\x1b[200~" + app + b"\x1b[201~")
-                sent_app = True
-            if sent_app and not sent_mouse and b"MOUSE_READY" in output:
+            if not sent_mouse and b"MOUSE_READY" in output:
                 os.write(fd, injected)
                 sent_mouse = True
             if b"SLSHMOUSEOK" in output or b"SLSHMOUSEBAD" in output:
