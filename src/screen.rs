@@ -61,7 +61,7 @@ pub struct Screen {
     alternate: Buffer,
     active: ActiveBuffer,
     cursor: Cursor,
-    saved_cursor: Cursor,
+    saved: SavedState,
     scroll_top: u16,
     scroll_bottom: u16,
     style: Style,
@@ -69,12 +69,24 @@ pub struct Screen {
     g0_dec_special_graphics: bool,
     g1_dec_special_graphics: bool,
     using_g1: bool,
+    origin_mode: bool,
     application_cursor_keys: bool,
 }
 
 #[derive(Debug, Clone)]
 struct Buffer {
     cells: Vec<Cell>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct SavedState {
+    cursor: Cursor,
+    style: Style,
+    wrap_next: bool,
+    g0_dec_special_graphics: bool,
+    g1_dec_special_graphics: bool,
+    using_g1: bool,
+    origin_mode: bool,
 }
 
 impl Screen {
@@ -90,7 +102,7 @@ impl Screen {
             alternate: Buffer::new(size),
             active: ActiveBuffer::Primary,
             cursor,
-            saved_cursor: Cursor::default(),
+            saved: SavedState::default(),
             scroll_top: 0,
             scroll_bottom: bottom,
             style: Style::default(),
@@ -98,6 +110,7 @@ impl Screen {
             g0_dec_special_graphics: false,
             g1_dec_special_graphics: false,
             using_g1: false,
+            origin_mode: false,
             application_cursor_keys: false,
         };
         screen.clamp_cursor();
@@ -148,8 +161,30 @@ impl Screen {
     }
 
     pub fn resize(&mut self, size: Size) {
+        self.resize_buffers(size);
+        self.clamp_after_resize(size);
+    }
+
+    pub fn resize_for_remote_reflow(&mut self, size: Size) -> bool {
+        let clear_active = self.active == ActiveBuffer::Alternate
+            || self.application_cursor_keys
+            || self.content_below_cursor();
+        self.resize_buffers(size);
+        if clear_active {
+            self.buffer_mut().clear();
+            self.style = Style::default();
+            self.wrap_next = false;
+        }
+        self.clamp_after_resize(size);
+        clear_active
+    }
+
+    fn resize_buffers(&mut self, size: Size) {
         self.primary.resize(self.size, size);
         self.alternate.resize(self.size, size);
+    }
+
+    fn clamp_after_resize(&mut self, size: Size) {
         self.size = size;
         self.scroll_top = 0;
         self.scroll_bottom = size.rows.saturating_sub(1);
@@ -226,7 +261,8 @@ impl Screen {
             let size = self.size;
             let top = self.scroll_top;
             let bottom = self.scroll_bottom;
-            self.buffer_mut().scroll_up(size, top, bottom);
+            let blank = self.blank_cell();
+            self.buffer_mut().scroll_up(size, top, bottom, blank);
         } else if self.cursor.row + 1 < self.size.rows {
             self.cursor.row += 1;
         }
@@ -251,6 +287,18 @@ impl Screen {
         };
     }
 
+    fn move_cursor_addressed(&mut self, row: u16, col: u16) {
+        let row = if self.origin_mode {
+            self.scroll_top
+                .saturating_add(row)
+                .min(self.scroll_bottom)
+                .min(self.size.rows.saturating_sub(1))
+        } else {
+            row.min(self.size.rows.saturating_sub(1))
+        };
+        self.move_cursor(row, col);
+    }
+
     fn move_relative(&mut self, rows: i32, cols: i32) {
         self.wrap_next = false;
         let row = (self.cursor.row as i32 + rows).clamp(0, self.size.rows.saturating_sub(1) as i32)
@@ -263,6 +311,7 @@ impl Screen {
     fn erase_display(&mut self, mode: u16) {
         let size = self.size;
         let cursor = self.cursor;
+        let blank = self.blank_cell();
         let buffer = self.buffer_mut();
         match mode {
             0 => {
@@ -273,16 +322,16 @@ impl Screen {
                             row: cursor.row,
                             col,
                         },
-                        Cell::default(),
+                        blank,
                     );
                 }
                 for row in cursor.row + 1..size.rows {
-                    buffer.clear_row(size, row);
+                    buffer.clear_row(size, row, blank);
                 }
             }
             1 => {
                 for row in 0..cursor.row {
-                    buffer.clear_row(size, row);
+                    buffer.clear_row(size, row, blank);
                 }
                 for col in 0..=cursor.col {
                     buffer.set(
@@ -291,11 +340,11 @@ impl Screen {
                             row: cursor.row,
                             col,
                         },
-                        Cell::default(),
+                        blank,
                     );
                 }
             }
-            2 | 3 => buffer.clear(),
+            2 | 3 => buffer.clear_with(blank),
             _ => {}
         }
     }
@@ -303,6 +352,7 @@ impl Screen {
     fn erase_line(&mut self, mode: u16) {
         let size = self.size;
         let cursor = self.cursor;
+        let blank = self.blank_cell();
         let buffer = self.buffer_mut();
         match mode {
             0 => {
@@ -313,7 +363,7 @@ impl Screen {
                             row: cursor.row,
                             col,
                         },
-                        Cell::default(),
+                        blank,
                     );
                 }
             }
@@ -325,11 +375,11 @@ impl Screen {
                             row: cursor.row,
                             col,
                         },
-                        Cell::default(),
+                        blank,
                     );
                 }
             }
-            2 => buffer.clear_row(size, cursor.row),
+            2 => buffer.clear_row(size, cursor.row, blank),
             _ => {}
         }
     }
@@ -338,20 +388,43 @@ impl Screen {
         if top < bottom && bottom < self.size.rows {
             self.scroll_top = top;
             self.scroll_bottom = bottom;
-            self.cursor = Cursor::default();
+            self.move_cursor_addressed(0, 0);
         }
     }
 
     fn set_alternate(&mut self, enabled: bool) {
         self.active = if enabled {
-            self.saved_cursor = self.cursor;
+            self.save_state();
             self.cursor = Cursor::default();
             self.alternate.clear();
             ActiveBuffer::Alternate
         } else {
-            self.cursor = self.saved_cursor;
+            self.restore_state();
             ActiveBuffer::Primary
         };
+    }
+
+    fn save_state(&mut self) {
+        self.saved = SavedState {
+            cursor: self.cursor,
+            style: self.style,
+            wrap_next: self.wrap_next,
+            g0_dec_special_graphics: self.g0_dec_special_graphics,
+            g1_dec_special_graphics: self.g1_dec_special_graphics,
+            using_g1: self.using_g1,
+            origin_mode: self.origin_mode,
+        };
+    }
+
+    fn restore_state(&mut self) {
+        self.cursor = self.saved.cursor;
+        self.style = self.saved.style;
+        self.wrap_next = self.saved.wrap_next;
+        self.g0_dec_special_graphics = self.saved.g0_dec_special_graphics;
+        self.g1_dec_special_graphics = self.saved.g1_dec_special_graphics;
+        self.using_g1 = self.saved.using_g1;
+        self.origin_mode = self.saved.origin_mode;
+        self.clamp_cursor();
     }
 
     fn active_charset_is_dec_special_graphics(&self) -> bool {
@@ -414,6 +487,7 @@ impl Screen {
         let size = self.size;
         let cursor = self.cursor;
         let count = count.min(size.cols.saturating_sub(cursor.col));
+        let blank = self.blank_cell();
         let buffer = self.buffer_mut();
         for col in (cursor.col..size.cols.saturating_sub(count)).rev() {
             let from = Cursor {
@@ -433,7 +507,7 @@ impl Screen {
                     row: cursor.row,
                     col,
                 },
-                Cell::default(),
+                blank,
             );
         }
     }
@@ -442,6 +516,7 @@ impl Screen {
         let size = self.size;
         let cursor = self.cursor;
         let count = count.min(size.cols.saturating_sub(cursor.col));
+        let blank = self.blank_cell();
         let buffer = self.buffer_mut();
         for col in cursor.col + count..size.cols {
             let from = Cursor {
@@ -461,7 +536,7 @@ impl Screen {
                     row: cursor.row,
                     col,
                 },
-                Cell::default(),
+                blank,
             );
         }
     }
@@ -473,8 +548,9 @@ impl Screen {
             return;
         }
         let bottom = self.scroll_bottom;
+        let blank = self.blank_cell();
         self.buffer_mut()
-            .insert_lines(size, cursor.row, bottom, count);
+            .insert_lines(size, cursor.row, bottom, count, blank);
     }
 
     fn delete_lines(&mut self, count: u16) {
@@ -484,14 +560,25 @@ impl Screen {
             return;
         }
         let bottom = self.scroll_bottom;
+        let blank = self.blank_cell();
         self.buffer_mut()
-            .delete_lines(size, cursor.row, bottom, count);
+            .delete_lines(size, cursor.row, bottom, count, blank);
+    }
+
+    fn blank_cell(&self) -> Cell {
+        Cell {
+            ch: ' ',
+            style: Style {
+                bg: self.style.bg,
+                ..Style::default()
+            },
+        }
     }
 
     fn clamp_cursor(&mut self) {
         self.move_cursor(self.cursor.row, self.cursor.col);
-        self.saved_cursor.row = self.saved_cursor.row.min(self.size.rows.saturating_sub(1));
-        self.saved_cursor.col = self.saved_cursor.col.min(self.size.cols.saturating_sub(1));
+        self.saved.cursor.row = self.saved.cursor.row.min(self.size.rows.saturating_sub(1));
+        self.saved.cursor.col = self.saved.cursor.col.min(self.size.cols.saturating_sub(1));
     }
 }
 
@@ -526,7 +613,7 @@ impl Perform for Screen {
             'C' => self.move_relative(0, param(params, 0, 1) as i32),
             'D' => self.move_relative(0, -(param(params, 0, 1) as i32)),
             'G' | '`' => self.move_cursor(self.cursor.row, param(params, 0, 1).saturating_sub(1)),
-            'H' | 'f' => self.move_cursor(
+            'H' | 'f' => self.move_cursor_addressed(
                 param(params, 0, 1).saturating_sub(1),
                 param(params, 1, 1).saturating_sub(1),
             ),
@@ -542,9 +629,15 @@ impl Perform for Screen {
                 param(params, 0, 1).saturating_sub(1),
                 param(params, 1, self.size.rows).saturating_sub(1),
             ),
+            's' => self.save_state(),
+            'u' => self.restore_state(),
             'h' if intermediates == b"?" => {
                 if has_private_mode(params, &[47, 1047, 1049]) {
                     self.set_alternate(true);
+                }
+                if has_private_mode(params, &[6]) {
+                    self.origin_mode = true;
+                    self.move_cursor_addressed(0, 0);
                 }
                 if has_private_mode(params, &[1]) {
                     self.application_cursor_keys = true;
@@ -553,6 +646,10 @@ impl Perform for Screen {
             'l' if intermediates == b"?" => {
                 if has_private_mode(params, &[47, 1047, 1049]) {
                     self.set_alternate(false);
+                }
+                if has_private_mode(params, &[6]) {
+                    self.origin_mode = false;
+                    self.move_cursor(0, 0);
                 }
                 if has_private_mode(params, &[1]) {
                     self.application_cursor_keys = false;
@@ -584,15 +681,16 @@ impl Perform for Screen {
         }
 
         match byte {
-            b'7' => self.saved_cursor = self.cursor,
-            b'8' => self.cursor = self.saved_cursor,
+            b'7' => self.save_state(),
+            b'8' => self.restore_state(),
             b'D' => self.linefeed(),
             b'M' => {
                 if self.cursor.row == self.scroll_top {
                     let size = self.size;
                     let top = self.scroll_top;
                     let bottom = self.scroll_bottom;
-                    self.buffer_mut().insert_lines(size, top, bottom, 1);
+                    let blank = self.blank_cell();
+                    self.buffer_mut().insert_lines(size, top, bottom, 1, blank);
                 } else {
                     self.cursor.row = self.cursor.row.saturating_sub(1);
                 }
@@ -628,13 +726,17 @@ impl Buffer {
         self.cells.fill(Cell::default());
     }
 
-    fn clear_row(&mut self, size: Size, row: u16) {
+    fn clear_with(&mut self, blank: Cell) {
+        self.cells.fill(blank);
+    }
+
+    fn clear_row(&mut self, size: Size, row: u16, blank: Cell) {
         for col in 0..size.cols {
-            self.set(size, Cursor { row, col }, Cell::default());
+            self.set(size, Cursor { row, col }, blank);
         }
     }
 
-    fn scroll_up(&mut self, size: Size, top: u16, bottom: u16) {
+    fn scroll_up(&mut self, size: Size, top: u16, bottom: u16, blank: Cell) {
         for row in top..bottom {
             for col in 0..size.cols {
                 let from = Cursor { row: row + 1, col };
@@ -642,10 +744,10 @@ impl Buffer {
                 self.set(size, to, self.get(size, from));
             }
         }
-        self.clear_row(size, bottom);
+        self.clear_row(size, bottom, blank);
     }
 
-    fn insert_lines(&mut self, size: Size, top: u16, bottom: u16, count: u16) {
+    fn insert_lines(&mut self, size: Size, top: u16, bottom: u16, count: u16, blank: Cell) {
         let count = count.min(bottom.saturating_sub(top) + 1);
         for row in (top..=bottom.saturating_sub(count)).rev() {
             for col in 0..size.cols {
@@ -658,11 +760,11 @@ impl Buffer {
             }
         }
         for row in top..top + count {
-            self.clear_row(size, row);
+            self.clear_row(size, row, blank);
         }
     }
 
-    fn delete_lines(&mut self, size: Size, top: u16, bottom: u16, count: u16) {
+    fn delete_lines(&mut self, size: Size, top: u16, bottom: u16, count: u16, blank: Cell) {
         let count = count.min(bottom.saturating_sub(top) + 1);
         for row in top + count..=bottom {
             for col in 0..size.cols {
@@ -675,7 +777,7 @@ impl Buffer {
             }
         }
         for row in bottom.saturating_sub(count) + 1..=bottom {
-            self.clear_row(size, row);
+            self.clear_row(size, row, blank);
         }
     }
 
@@ -919,6 +1021,65 @@ mod tests {
     }
 
     #[test]
+    fn save_restore_preserves_rendition_state() {
+        let mut screen = Screen::new(Size { cols: 5, rows: 1 });
+
+        feed(&mut screen, b"\x1b[31mA\x1b7\x1b[42mB\x1b8C");
+
+        assert_eq!(screen.cell(Cursor { row: 0, col: 0 }).style.fg, Color::Indexed(1));
+        assert_eq!(screen.cell(Cursor { row: 0, col: 1 }).style.fg, Color::Indexed(1));
+        assert_eq!(
+            screen.cell(Cursor { row: 0, col: 1 }).style.bg,
+            Color::Default
+        );
+    }
+
+    #[test]
+    fn csi_save_restore_preserves_rendition_state() {
+        let mut screen = Screen::new(Size { cols: 5, rows: 1 });
+
+        feed(&mut screen, b"\x1b[34mA\x1b[s\x1b[42mB\x1b[uC");
+
+        assert_eq!(screen.cell(Cursor { row: 0, col: 1 }).style.fg, Color::Indexed(4));
+        assert_eq!(
+            screen.cell(Cursor { row: 0, col: 1 }).style.bg,
+            Color::Default
+        );
+    }
+
+    #[test]
+    fn origin_mode_addresses_within_scroll_region() {
+        let mut screen = Screen::new(Size { cols: 5, rows: 5 });
+
+        feed(&mut screen, b"\x1b[2;4r\x1b[?6h\x1b[1;1HX");
+
+        assert_eq!(screen.cell(Cursor { row: 1, col: 0 }).ch, 'X');
+        assert_eq!(screen.cursor(), Cursor { row: 1, col: 1 });
+
+        feed(&mut screen, b"\x1b[?6l\x1b[1;1HY");
+
+        assert_eq!(screen.cell(Cursor { row: 0, col: 0 }).ch, 'Y');
+    }
+
+    #[test]
+    fn erase_uses_current_background_color() {
+        let mut screen = Screen::new(Size { cols: 4, rows: 1 });
+
+        feed(&mut screen, b"abcd\x1b[42m\x1b[1;2H\x1b[K");
+
+        assert_eq!(screen.cell(Cursor { row: 0, col: 0 }).ch, 'a');
+        assert_eq!(screen.cell(Cursor { row: 0, col: 1 }).ch, ' ');
+        assert_eq!(
+            screen.cell(Cursor { row: 0, col: 1 }).style.bg,
+            Color::Indexed(2)
+        );
+        assert_eq!(
+            screen.cell(Cursor { row: 0, col: 3 }).style.bg,
+            Color::Indexed(2)
+        );
+    }
+
+    #[test]
     fn maps_dec_special_graphics() {
         let mut screen = Screen::new(Size { cols: 4, rows: 1 });
 
@@ -994,5 +1155,32 @@ mod tests {
         assert_eq!(screen.cell(Cursor { row: 0, col: 0 }).ch, 'a');
         assert_eq!(screen.cell(Cursor { row: 0, col: 1 }).ch, 'b');
         assert_eq!(screen.cursor(), Cursor { row: 0, col: 1 });
+    }
+
+    #[test]
+    fn resize_reflow_clears_active_layout_content() {
+        let mut screen = Screen::new(Size { cols: 10, rows: 4 });
+
+        feed(
+            &mut screen,
+            b"pane\x1b[4;1H\x1b[42mstatus\x1b[0m\x1b[2;1H",
+        );
+
+        assert!(screen.resize_for_remote_reflow(Size { cols: 10, rows: 3 }));
+        assert!(screen.cells().iter().all(|cell| *cell == Cell::default()));
+        assert_eq!(screen.style(), Style::default());
+        assert_eq!(screen.cursor(), Cursor { row: 1, col: 0 });
+    }
+
+    #[test]
+    fn resize_reflow_preserves_simple_prompt() {
+        let mut screen = Screen::new(Size { cols: 10, rows: 4 });
+
+        feed(&mut screen, b"$ ");
+
+        assert!(!screen.resize_for_remote_reflow(Size { cols: 8, rows: 4 }));
+        assert_eq!(screen.cell(Cursor { row: 0, col: 0 }).ch, '$');
+        assert_eq!(screen.cell(Cursor { row: 0, col: 1 }).ch, ' ');
+        assert_eq!(screen.cursor(), Cursor { row: 0, col: 2 });
     }
 }
