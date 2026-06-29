@@ -87,6 +87,7 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
     key_trace.log(format_args!("predictor {}", predictor.name()));
     let mut pressed_keys = HashSet::new();
     let mut remote_coalescer = RemoteCoalescer::default();
+    let mut terminal_queries = TerminalQueryParser::default();
     let mut waiting_for_resize_frame = false;
     #[cfg(not(windows))]
     let mut mouse_protocol = key::MouseProtocol::default();
@@ -98,14 +99,23 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
         if remote_coalescer.ready(Instant::now(), overlay_pending(predictor.overlay())) {
             let remote_output = remote_coalescer.take();
 
-            let remote_update =
-                apply_remote_bytes(&remote_output, &mut screen, &mut parser, predictor.as_mut());
+            let remote_update = apply_remote_bytes(
+                &remote_output,
+                &mut screen,
+                &mut parser,
+                predictor.as_mut(),
+                &mut terminal_queries,
+            );
+            if !remote_update.terminal_responses.is_empty() {
+                transport.write(&remote_update.terminal_responses)?;
+            }
             waiting_for_resize_frame = false;
             #[cfg(not(windows))]
             mouse_protocol.feed(&remote_output);
             if remote_update.terminal_mode_changed {
+                let terminal_output = strip_terminal_queries(&remote_output);
                 stdout
-                    .write_all(&remote_output)
+                    .write_all(&terminal_output)
                     .context("failed to render ssh output")?;
                 if remote_update.left_alternate {
                     stdout
@@ -214,7 +224,16 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
         if let Some(status) = transport.try_wait()? {
             if !remote_coalescer.is_empty() {
                 let remote_output = remote_coalescer.take();
-                apply_remote_bytes(&remote_output, &mut screen, &mut parser, predictor.as_mut());
+                let remote_update = apply_remote_bytes(
+                    &remote_output,
+                    &mut screen,
+                    &mut parser,
+                    predictor.as_mut(),
+                    &mut terminal_queries,
+                );
+                if !remote_update.terminal_responses.is_empty() {
+                    transport.write(&remote_update.terminal_responses)?;
+                }
                 let output = renderer.render(&screen, predictor.overlay());
                 stdout
                     .write_all(output.as_bytes())
@@ -233,10 +252,11 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct RemoteUpdate {
     left_alternate: bool,
     terminal_mode_changed: bool,
+    terminal_responses: Vec<u8>,
 }
 
 #[derive(Debug, Default)]
@@ -300,11 +320,14 @@ fn apply_remote_bytes(
     screen: &mut Screen,
     parser: &mut vte::Parser,
     predictor: &mut dyn predict::PredictorPlugin,
+    terminal_queries: &mut TerminalQueryParser,
 ) -> RemoteUpdate {
     let before_active = screen.active();
     let before_application_cursor = screen.application_cursor_keys();
+    let mut terminal_responses = Vec::new();
     for byte in bytes {
         screen.feed(parser, std::slice::from_ref(byte));
+        terminal_queries.push(*byte, screen, &mut terminal_responses);
     }
     predictor.reconcile(screen);
 
@@ -319,7 +342,153 @@ fn apply_remote_bytes(
     RemoteUpdate {
         left_alternate,
         terminal_mode_changed,
+        terminal_responses,
     }
+}
+
+#[derive(Debug, Default)]
+struct TerminalQueryParser {
+    state: TerminalQueryState,
+}
+
+#[derive(Debug, Default)]
+enum TerminalQueryState {
+    #[default]
+    Ground,
+    Escape,
+    Csi(Vec<u8>),
+    Osc(Vec<u8>),
+    OscEscape(Vec<u8>),
+}
+
+impl TerminalQueryParser {
+    fn push(&mut self, byte: u8, screen: &Screen, responses: &mut Vec<u8>) {
+        let state = std::mem::take(&mut self.state);
+        self.state = match state {
+            TerminalQueryState::Ground => {
+                if byte == 0x1b {
+                    TerminalQueryState::Escape
+                } else {
+                    TerminalQueryState::Ground
+                }
+            }
+            TerminalQueryState::Escape => match byte {
+                b'[' => TerminalQueryState::Csi(Vec::new()),
+                b']' => TerminalQueryState::Osc(Vec::new()),
+                0x1b => TerminalQueryState::Escape,
+                _ => TerminalQueryState::Ground,
+            },
+            TerminalQueryState::Csi(mut bytes) => {
+                if (0x40..=0x7e).contains(&byte) {
+                    if let Some(response) = csi_terminal_response(&bytes, byte, screen.cursor()) {
+                        responses.extend_from_slice(response.as_bytes());
+                    }
+                    TerminalQueryState::Ground
+                } else {
+                    bytes.push(byte);
+                    TerminalQueryState::Csi(bytes)
+                }
+            }
+            TerminalQueryState::Osc(mut bytes) => match byte {
+                0x07 => {
+                    if let Some(response) = osc_terminal_response(&bytes) {
+                        responses.extend_from_slice(response.as_bytes());
+                    }
+                    TerminalQueryState::Ground
+                }
+                0x1b => TerminalQueryState::OscEscape(bytes),
+                _ => {
+                    bytes.push(byte);
+                    TerminalQueryState::Osc(bytes)
+                }
+            },
+            TerminalQueryState::OscEscape(mut bytes) => {
+                if byte == b'\\' {
+                    if let Some(response) = osc_terminal_response(&bytes) {
+                        responses.extend_from_slice(response.as_bytes());
+                    }
+                    TerminalQueryState::Ground
+                } else {
+                    bytes.push(0x1b);
+                    bytes.push(byte);
+                    TerminalQueryState::Osc(bytes)
+                }
+            }
+        };
+    }
+}
+
+fn csi_terminal_response(body: &[u8], final_byte: u8, cursor: screen::Cursor) -> Option<String> {
+    match (body, final_byte) {
+        (b"6", b'n') => Some(format!("\x1b[{};{}R", cursor.row + 1, cursor.col + 1)),
+        (b"" | b"0", b'c') => Some("\x1b[?1;2c".into()),
+        (b">", b'c') => Some("\x1b[>0;0;0c".into()),
+        _ => None,
+    }
+}
+
+fn osc_terminal_response(body: &[u8]) -> Option<&'static str> {
+    match body {
+        b"10;?" => Some("\x1b]10;rgb:ffff/ffff/ffff\x07"),
+        b"11;?" => Some("\x1b]11;rgb:0000/0000/0000\x07"),
+        b"12;?" => Some("\x1b]12;rgb:ffff/ffff/ffff\x07"),
+        _ => None,
+    }
+}
+
+fn strip_terminal_queries(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != 0x1b {
+            out.push(bytes[index]);
+            index += 1;
+            continue;
+        }
+
+        if let Some(end) = csi_end(bytes, index) {
+            let body = &bytes[index + 2..end];
+            let final_byte = bytes[end];
+            if csi_terminal_response(body, final_byte, screen::Cursor::default()).is_some() {
+                index = end + 1;
+                continue;
+            }
+        }
+
+        if let Some(end) = osc_end(bytes, index) {
+            let body_end = if bytes[end] == 0x07 { end } else { end - 1 };
+            if osc_terminal_response(&bytes[index + 2..body_end]).is_some() {
+                index = end + 1;
+                continue;
+            }
+        }
+
+        out.push(bytes[index]);
+        index += 1;
+    }
+    out
+}
+
+fn csi_end(bytes: &[u8], index: usize) -> Option<usize> {
+    if bytes.get(index..index + 2) != Some(b"\x1b[") {
+        return None;
+    }
+    (index + 2..bytes.len()).find(|offset| (0x40..=0x7e).contains(&bytes[*offset]))
+}
+
+fn osc_end(bytes: &[u8], index: usize) -> Option<usize> {
+    if bytes.get(index..index + 2) != Some(b"\x1b]") {
+        return None;
+    }
+    let mut offset = index + 2;
+    while offset < bytes.len() {
+        match bytes[offset] {
+            0x07 => return Some(offset),
+            0x1b if bytes.get(offset + 1) == Some(&b'\\') => return Some(offset + 1),
+            _ => offset += 1,
+        }
+    }
+    None
 }
 
 fn compositor_ssh_args(parsed: &ParsedSshArgs) -> Vec<String> {
@@ -703,6 +872,7 @@ mod tests {
     fn remote_repaint_burst_reconciles_after_final_screen_state() {
         let mut screen = Screen::new(Size { cols: 20, rows: 3 });
         let mut parser = vte::Parser::new();
+        let mut terminal_queries = TerminalQueryParser::default();
         screen.feed(&mut parser, b"$ ");
         let mut predictor = predict::BasePredictor::new(true);
         predictor.on_key(key::KeyIntent::Printable('a'), &screen);
@@ -712,15 +882,47 @@ mod tests {
             &mut screen,
             &mut parser,
             &mut predictor,
+            &mut terminal_queries,
         );
 
         assert!(!update.terminal_mode_changed);
+        assert!(update.terminal_responses.is_empty());
         assert_eq!(predictor.overlay.cells.len(), 1);
         assert_eq!(predictor.overlay.cells[0].cell.ch, 'a');
         assert_eq!(
             predictor.overlay.cursor,
             Some(screen::Cursor { row: 0, col: 3 })
         );
+    }
+
+    #[test]
+    fn terminal_queries_are_answered_from_screen_state() {
+        let mut screen = Screen::new(Size { cols: 80, rows: 24 });
+        let mut parser = vte::Parser::new();
+        let mut terminal_queries = TerminalQueryParser::default();
+        let mut predictor = predict::BasePredictor::new(true);
+
+        let update = apply_remote_bytes(
+            b"\x1b[2;3H\x1b[6n\x1b[>c\x1b]10;?\x07\x1b]11;?\x1b\\",
+            &mut screen,
+            &mut parser,
+            &mut predictor,
+            &mut terminal_queries,
+        );
+
+        assert_eq!(
+            update.terminal_responses,
+            b"\x1b[2;3R\x1b[>0;0;0c\x1b]10;rgb:ffff/ffff/ffff\x07\x1b]11;rgb:0000/0000/0000\x07"
+        );
+    }
+
+    #[test]
+    fn terminal_queries_are_stripped_from_raw_passthrough() {
+        let stripped = strip_terminal_queries(
+            b"before\x1b[6n\x1b[>c\x1b]10;?\x07\x1b]11;?\x1b\\after\x1b[31mred",
+        );
+
+        assert_eq!(stripped, b"beforeafter\x1b[31mred");
     }
 
     #[test]
