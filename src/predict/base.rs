@@ -212,13 +212,14 @@ impl BasePredictor {
 
         let under = screen.cell(target);
         if !self.remove_owned(target) {
-            let Some(start) = confirmed_deletion_start(target, screen) else {
+            if !confirmed_deletion_allowed(target, screen) {
                 if self.overlay.cells.is_empty() {
                     self.clear();
                 }
                 return;
-            };
-            self.edit_anchor.get_or_insert(start);
+            }
+            self.edit_anchor
+                .get_or_insert_with(|| confirmed_deletion_anchor(target, screen));
         }
 
         if under.ch != ' ' {
@@ -683,6 +684,14 @@ fn command_submit_context(screen: &Screen) -> bool {
         && !screen.content_below_cursor()
 }
 
+fn confirmed_deletion_anchor(target: Cursor, screen: &Screen) -> Cursor {
+    confirmed_deletion_start(target, screen).unwrap_or(target)
+}
+
+fn confirmed_deletion_allowed(target: Cursor, screen: &Screen) -> bool {
+    confirmed_deletion_start(target, screen).is_some() || application_edit_context(screen)
+}
+
 fn confirmed_deletion_start(target: Cursor, screen: &Screen) -> Option<Cursor> {
     let start = command_start_before_cursor(screen)?;
     (cursor_index(target, screen) >= cursor_index(start, screen)).then_some(start)
@@ -721,6 +730,12 @@ fn command_start_before_cursor(screen: &Screen) -> Option<Cursor> {
         row: cursor.row,
         col,
     })
+}
+
+fn application_edit_context(screen: &Screen) -> bool {
+    screen.active() == ActiveBuffer::Alternate
+        || screen.application_cursor_keys()
+        || screen.content_below_cursor()
 }
 
 #[cfg(test)]
@@ -859,6 +874,20 @@ mod tests {
             OverlayKind::Deletion { remote_seen: true }
         );
         assert_eq!(predictor.overlay.cursor, Some(Cursor { row: 0, col: 5 }));
+    }
+
+    #[test]
+    fn backspace_marks_confirmed_tui_text_for_deletion() {
+        let screen = screen_with_size(Size { cols: 20, rows: 5 }, b"\x1b[?1049hhello");
+        let mut predictor = BasePredictor::new(true);
+
+        predictor.on_key(KeyIntent::Backspace, &screen);
+
+        assert_eq!(predictor.overlay.cells.len(), 1);
+        assert_eq!(predictor.overlay.cells[0].pos, Cursor { row: 0, col: 4 });
+        assert_eq!(predictor.overlay.cells[0].cell.ch, 'o');
+        assert!(predictor.overlay.cells[0].cell.style.strikethrough);
+        assert_eq!(predictor.overlay.cursor, Some(Cursor { row: 0, col: 4 }));
     }
 
     #[test]
