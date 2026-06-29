@@ -86,7 +86,6 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
     let mut key_trace = KeyTrace::from_env();
     key_trace.log(format_args!("predictor {}", predictor.name()));
     let mut pressed_keys = HashSet::new();
-    let mut raw_synced = true;
     let mut remote_coalescer = RemoteCoalescer::default();
     #[cfg(not(windows))]
     let mut mouse_protocol = key::MouseProtocol::default();
@@ -117,14 +116,7 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
                     screen.reset_style();
                 }
                 renderer.sync_to_terminal(&screen, predictor.overlay());
-                raw_synced = true;
                 dirty = false;
-            } else if raw_synced && predictor.overlay().cells.is_empty() {
-                stdout
-                    .write_all(&remote_output)
-                    .context("failed to render ssh output")?;
-                stdout.flush().context("failed to flush ssh output")?;
-                renderer.sync_to_terminal(&screen, predictor.overlay());
             } else {
                 dirty = true;
             }
@@ -177,7 +169,6 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
                     renderer.invalidate();
                     predictor.clear();
                     dirty = true;
-                    raw_synced = false;
                 }
                 #[cfg(not(windows))]
                 Some(InputEvent::Mouse(mouse)) => {
@@ -210,7 +201,6 @@ fn run_compositor(parsed: ParsedSshArgs) -> Result<i32> {
                 .write_all(output.as_bytes())
                 .context("failed to render terminal")?;
             stdout.flush().context("failed to flush terminal")?;
-            raw_synced = predictor.overlay().cells.is_empty();
         }
 
         if let Some(status) = transport.try_wait()? {

@@ -42,6 +42,7 @@ def main() -> int:
 
     startup_screen = reduce_terminal(startup_output)
     output_screen = reduce_terminal(output)
+    primary_output_before_alternate = reduce_terminal(output.split(b"\x1b[?1049h", 1)[0])
     checks = {
         "startup stderr warning visible": "Warning fake ssh stderr" in startup_screen,
         "startup login preamble visible": "Welcome fake ssh login" in startup_screen,
@@ -62,7 +63,7 @@ def main() -> int:
         "ctrl-delete key forwarded": b"\x1b[3;5~" in ssh_input,
         "application up key forwarded": b"\x1bOA" in ssh_input,
         "application down key forwarded": b"\x1bOB" in ssh_input,
-        "login preamble captured": b"Welcome fake ssh login" in output,
+        "login preamble captured": "Welcome fake ssh login" in primary_output_before_alternate,
         "prompt/output rendered": b"bash" in output or b"#" in output or b"$" in output,
     }
 

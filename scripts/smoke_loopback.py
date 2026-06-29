@@ -39,6 +39,7 @@ def main() -> int:
     app_prefix_output = run_app_prefix_guard()
     app_cursor_output = run_app_cursor_overlay()
     split_repaint_output = run_split_repaint_overlay()
+    split_escape_output = run_split_escape_after_nonlinear_key()
     mouse_sgr_output = run_mouse_forwarding(True)
     mouse_x10_output = run_mouse_forwarding(False)
 
@@ -63,6 +64,10 @@ def main() -> int:
         failed.append("app cursor overlay row")
     if b"SPLIT" not in split_repaint_output:
         failed.append("split repaint keeps predicted text")
+    if b"COMPLETE" not in split_escape_output:
+        failed.append("split escape repaint completes")
+    if b"\x1b[2\x1b[" in split_escape_output:
+        failed.append("split remote escape never interleaves local patches")
     if b"SLSHMOUSEOK" not in mouse_sgr_output:
         failed.append("SGR mouse forwarding")
     if b"SLSHMOUSEOK" not in mouse_x10_output:
@@ -88,6 +93,8 @@ def main() -> int:
         sys.stderr.buffer.write(app_cursor_output)
         sys.stderr.write("\nSplit repaint bytes:\n")
         sys.stderr.buffer.write(split_repaint_output)
+        sys.stderr.write("\nSplit escape bytes:\n")
+        sys.stderr.buffer.write(split_escape_output)
         sys.stderr.write("\nSGR mouse bytes:\n")
         sys.stderr.buffer.write(mouse_sgr_output)
         sys.stderr.write("\nX10 mouse bytes:\n")
@@ -533,6 +540,76 @@ def run_split_repaint_overlay() -> bytes:
                 sent = True
                 sent_at = time.time()
             if sent and time.time() - sent_at >= 0.4:
+                return capture
+    finally:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+
+    return capture
+
+
+def run_split_escape_after_nonlinear_key() -> bytes:
+    app = (
+        "import os,sys,tty,time;"
+        "tty.setraw(0);"
+        "sys.stdout.write('READY\\r\\n> ');"
+        "sys.stdout.flush();"
+        "\nwhile True:\n"
+        "    data=os.read(0,1)\n"
+        "    if not data or data == b'\\x03': break\n"
+        "    if data == b'\\t':\n"
+        "        sys.stdout.write('\\033[2')\n"
+        "        sys.stdout.flush()\n"
+        "        time.sleep(0.20)\n"
+        "        sys.stdout.write('K> COMPLETE\\r\\nnext> ')\n"
+        "        sys.stdout.flush()\n"
+        "    elif data == b'X':\n"
+        "        sys.stdout.write('X')\n"
+        "        sys.stdout.flush()\n"
+        "        time.sleep(0.05)\n"
+        "        break\n"
+    )
+    argv = [os.path.join(ROOT, "target", "debug", "slsh"), "ignored-host", "python3", "-c", app]
+    env = loopback_env()
+
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.execvpe(argv[0], argv, env)
+
+    termios.tcflush(fd, termios.TCIOFLUSH)
+    os.set_blocking(fd, False)
+    fcntl_rows_cols(fd, 12, 60)
+
+    output = b""
+    capture = b""
+    sent_tab = False
+    sent_x = False
+    tab_at = 0.0
+    deadline = time.time() + 8
+    try:
+        while time.time() < deadline:
+            readable, _, _ = select.select([fd], [], [], 0.01)
+            if readable:
+                try:
+                    chunk = os.read(fd, 4096)
+                    output += chunk
+                    if sent_tab:
+                        capture += chunk
+                except BlockingIOError:
+                    pass
+                except OSError:
+                    return capture
+
+            if not sent_tab and b"READY" in output:
+                os.write(fd, b"\t")
+                sent_tab = True
+                tab_at = time.time()
+            if sent_tab and not sent_x and time.time() - tab_at >= 0.08:
+                os.write(fd, b"X")
+                sent_x = True
+            if sent_x and time.time() - tab_at >= 0.45:
                 return capture
     finally:
         try:
