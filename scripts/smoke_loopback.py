@@ -44,6 +44,7 @@ def main() -> int:
     mouse_sgr_output = run_mouse_forwarding(True)
     mouse_x10_output = run_mouse_forwarding(False)
     vim_output = run_vim_shell() if shutil.which("vim") else None
+    vim_fast_output = run_vim_fast_insert_guard() if shutil.which("vim") else None
 
     failed = []
     if marker not in output:
@@ -83,6 +84,16 @@ def main() -> int:
             failed.append("vim color query leaked")
         if vim_output.count(b"\x1b[6n") > 1:
             failed.append("vim cursor query leaked")
+    if vim_fast_output is not None:
+        if b"-- INSERT --" not in vim_fast_output:
+            failed.append("vim fast insert screen")
+        before_insert, _, after_insert = vim_fast_output.partition(b"-- INSERT --")
+        if b"\x1b[2mi" in before_insert or b"\x1b[2mislsh" in before_insert:
+            failed.append("vim normal mode does not predict insert command")
+        if b"\x1b[7m" in before_insert:
+            failed.append("vim normal mode does not draw speculative cursor")
+        if b"\x1b[2mZ" not in after_insert:
+            failed.append("vim insert mode resumes prediction")
 
     if failed:
         sys.stderr.write("loopback smoke failed: marker missing\n")
@@ -113,6 +124,9 @@ def main() -> int:
         if vim_output is not None:
             sys.stderr.write("\nVim bytes:\n")
             sys.stderr.buffer.write(vim_output)
+        if vim_fast_output is not None:
+            sys.stderr.write("\nVim fast bytes:\n")
+            sys.stderr.buffer.write(vim_fast_output)
         sys.stderr.write("\n")
         return 1
 
@@ -191,9 +205,8 @@ def run_delayed_local_echo() -> bytes:
 
     output = b""
     sent = False
-    send_at = time.time() + 1.25
     capture_until = None
-    deadline = time.time() + 4
+    deadline = time.time() + 6
     try:
         while time.time() < deadline:
             readable, _, _ = select.select([fd], [], [], 0.02)
@@ -205,7 +218,7 @@ def run_delayed_local_echo() -> bytes:
                 except OSError:
                     return output
 
-            if not sent and time.time() >= send_at:
+            if not sent and (b"$" in output or b"#" in output):
                 os.write(fd, b"SLSHLAG")
                 sent = True
                 capture_until = time.time() + 0.25
@@ -235,8 +248,7 @@ def run_delayed_submit_overlay() -> bytes:
     output = b""
     sent = False
     sent_at = 0.0
-    send_at = time.time() + 1.25
-    deadline = time.time() + 4
+    deadline = time.time() + 6
     try:
         while time.time() < deadline:
             readable, _, _ = select.select([fd], [], [], 0.02)
@@ -248,7 +260,7 @@ def run_delayed_submit_overlay() -> bytes:
                 except OSError:
                     return output
 
-            if not sent and time.time() >= send_at:
+            if not sent and (b"$" in output or b"#" in output):
                 os.write(fd, b"echo SLSHSUBMIT\r")
                 sent = True
                 sent_at = time.time()
@@ -691,6 +703,71 @@ def run_vim_shell() -> bytes:
                 stage = "exit"
                 stage_at = time.time()
             elif stage == "exit" and time.time() - stage_at >= 0.5:
+                return output
+    finally:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+
+    return output
+
+
+def run_vim_fast_insert_guard() -> bytes:
+    argv = [
+        os.path.join(ROOT, "target", "debug", "slsh"),
+        "ignored-host",
+        "vim",
+        "-Nu",
+        "NONE",
+        "-n",
+        "-i",
+        "NONE",
+        "/tmp/slsh-vim-fast-guard.txt",
+    ]
+    env = loopback_env("500")
+    env["SHELL"] = "/bin/sh"
+    env["TERM"] = "xterm-256color"
+
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.execvpe(argv[0], argv, env)
+
+    termios.tcflush(fd, termios.TCIOFLUSH)
+    os.set_blocking(fd, False)
+    fcntl_rows_cols(fd, 24, 80)
+
+    output = b""
+    sent_fast = False
+    sent_after_insert = False
+    after_insert_at = 0.0
+    deadline = time.time() + 8
+    try:
+        while time.time() < deadline:
+            try:
+                waited, _ = os.waitpid(pid, os.WNOHANG)
+            except ChildProcessError:
+                return output
+            if waited == pid:
+                return output
+
+            readable, _, _ = select.select([fd], [], [], 0.02)
+            if readable:
+                try:
+                    output += os.read(fd, 4096)
+                except BlockingIOError:
+                    pass
+                except OSError:
+                    return output
+
+            if not sent_fast and b'"/tmp/slsh-vim-fast-guard.txt"' in output:
+                os.write(fd, b"islsh guard")
+                sent_fast = True
+            elif sent_fast and not sent_after_insert and b"-- INSERT --" in output:
+                os.write(fd, b"Z")
+                sent_after_insert = True
+                after_insert_at = time.time()
+            elif sent_after_insert and time.time() - after_insert_at >= 0.35:
                 return output
     finally:
         try:

@@ -125,6 +125,10 @@ impl BasePredictor {
             self.clear();
             return;
         }
+        if !printable_prediction_context(screen) {
+            self.block_until_remote_output(screen);
+            return;
+        }
 
         let width = UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
         if width == 0 || width > 2 {
@@ -684,6 +688,17 @@ fn command_submit_context(screen: &Screen) -> bool {
         && !screen.content_below_cursor()
 }
 
+fn printable_prediction_context(screen: &Screen) -> bool {
+    if !screen_has_content(screen) {
+        return false;
+    }
+    command_submit_context(screen) || application_text_entry_context(screen)
+}
+
+fn screen_has_content(screen: &Screen) -> bool {
+    screen.cells().iter().any(|cell| *cell != Cell::default())
+}
+
 fn confirmed_deletion_anchor(target: Cursor, screen: &Screen) -> Cursor {
     confirmed_deletion_start(target, screen).unwrap_or(target)
 }
@@ -736,6 +751,57 @@ fn application_edit_context(screen: &Screen) -> bool {
     screen.active() == ActiveBuffer::Alternate
         || screen.application_cursor_keys()
         || screen.content_below_cursor()
+}
+
+fn application_text_entry_context(screen: &Screen) -> bool {
+    if !application_edit_context(screen) {
+        return false;
+    }
+
+    bottom_text_contains(screen, "-- INSERT --")
+        || bottom_text_contains(screen, "-- REPLACE --")
+        || visible_text_contains(screen, "GNU nano")
+        || visible_text_contains(screen, "^X Exit")
+        || current_line_has_input_prompt(screen)
+}
+
+fn bottom_text_contains(screen: &Screen, needle: &str) -> bool {
+    if screen.size().rows == 0 {
+        return false;
+    }
+    let first_row = screen.size().rows.saturating_sub(2);
+    visible_rows_contain(screen, first_row, screen.size().rows, needle)
+}
+
+fn visible_text_contains(screen: &Screen, needle: &str) -> bool {
+    visible_rows_contain(screen, 0, screen.size().rows, needle)
+}
+
+fn visible_rows_contain(screen: &Screen, first_row: u16, end_row: u16, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+
+    let cols = screen.size().cols;
+    for row in first_row..end_row.min(screen.size().rows) {
+        let mut line = String::new();
+        for col in 0..cols {
+            line.push(screen.cell(Cursor { row, col }).ch);
+        }
+        if line.contains(needle) {
+            return true;
+        }
+    }
+    false
+}
+
+fn current_line_has_input_prompt(screen: &Screen) -> bool {
+    let line = current_line_before_cursor(screen);
+    let trimmed = line.trim_start();
+    trimmed.starts_with('>')
+        || trimmed.starts_with(':')
+        || trimmed.starts_with('/')
+        || trimmed.starts_with('?')
 }
 
 #[cfg(test)]
@@ -819,7 +885,7 @@ mod tests {
 
     #[test]
     fn backspace_marks_unconfirmed_overlay_for_deletion() {
-        let screen = screen_with(b"");
+        let screen = screen_with(b"$ ");
         let mut predictor = BasePredictor::new(true);
 
         predictor.on_key(KeyIntent::Printable('a'), &screen);
@@ -834,7 +900,7 @@ mod tests {
         assert_eq!(predictor.overlay.cells[0].cell.style.fg, Color::Indexed(8));
         assert!(predictor.overlay.cells[0].cell.style.dim);
         assert!(predictor.overlay.cells[0].cell.style.strikethrough);
-        assert_eq!(predictor.overlay.cursor, Some(Cursor { row: 0, col: 0 }));
+        assert_eq!(predictor.overlay.cursor, Some(Cursor { row: 0, col: 2 }));
     }
 
     #[test]
@@ -1448,7 +1514,7 @@ mod tests {
         assert!(predictor.overlay.cells.is_empty());
         assert!(!predictor.submitted);
 
-        feed(&mut screen, b"\r\n");
+        feed(&mut screen, b"\r\n> ");
         predictor.reconcile(&screen);
         predictor.on_key(KeyIntent::Printable('b'), &screen);
 
@@ -1467,7 +1533,7 @@ mod tests {
 
         assert!(predictor.overlay.cells.is_empty());
 
-        feed(&mut screen, b"\r\n");
+        feed(&mut screen, b"\x1b[24;1H-- INSERT --\x1b[1;1H");
         predictor.reconcile(&screen);
         predictor.on_key(KeyIntent::Printable('b'), &screen);
 
@@ -1704,13 +1770,68 @@ mod tests {
 
     #[test]
     fn unchanged_under_cell_keeps_overlay() {
-        let screen = screen_with(b"");
+        let screen = screen_with(b"$ ");
         let mut predictor = BasePredictor::new(true);
 
         predictor.on_key(KeyIntent::Printable('a'), &screen);
         predictor.reconcile(&screen);
 
         assert_eq!(predictor.overlay.cells.len(), 1);
+    }
+
+    #[test]
+    fn empty_screen_waits_for_remote_content_before_prediction() {
+        let mut screen = screen_with(b"");
+        let mut predictor = BasePredictor::new(true);
+
+        predictor.on_key(KeyIntent::Printable('a'), &screen);
+        predictor.on_key(KeyIntent::Printable('b'), &screen);
+
+        assert!(predictor.overlay.cells.is_empty());
+
+        feed(&mut screen, b"$ ");
+        predictor.reconcile(&screen);
+        predictor.on_key(KeyIntent::Printable('c'), &screen);
+
+        assert_eq!(predictor.overlay.cells.len(), 1);
+        assert_eq!(predictor.overlay.cells[0].cell.ch, 'c');
+    }
+
+    #[test]
+    fn vim_normal_mode_printable_waits_for_insert_screen() {
+        let mut screen = screen_with_size(
+            Size { cols: 40, rows: 4 },
+            b"\x1b[?1049h\x1b[H\x1b[2J~\x1b[2;1H~\x1b[1;1H",
+        );
+        let mut predictor = BasePredictor::new(true);
+
+        predictor.on_key(KeyIntent::Printable('i'), &screen);
+        predictor.on_key(KeyIntent::Printable('s'), &screen);
+
+        assert!(predictor.overlay.cells.is_empty());
+
+        feed(&mut screen, b"\x1b[4;1H-- INSERT --\x1b[1;1H");
+        predictor.reconcile(&screen);
+        predictor.on_key(KeyIntent::Printable('s'), &screen);
+
+        assert_eq!(predictor.overlay.cells.len(), 1);
+        assert_eq!(predictor.overlay.cells[0].cell.ch, 's');
+        assert_eq!(predictor.overlay.cells[0].pos, Cursor { row: 0, col: 0 });
+    }
+
+    #[test]
+    fn nano_like_editor_screen_allows_edit_row_prediction() {
+        let screen = screen_with_size(
+            Size { cols: 40, rows: 4 },
+            b"\x1b[?1049hGNU nano\x1b[2;1H\x1b[4;1H^X Exit\x1b[2;1H",
+        );
+        let mut predictor = BasePredictor::new(true);
+
+        predictor.on_key(KeyIntent::Printable('Z'), &screen);
+
+        assert_eq!(predictor.overlay.cells.len(), 1);
+        assert_eq!(predictor.overlay.cells[0].cell.ch, 'Z');
+        assert_eq!(predictor.overlay.cells[0].pos, Cursor { row: 1, col: 0 });
     }
 
     #[test]

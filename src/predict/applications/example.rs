@@ -45,7 +45,9 @@ mod tests {
 
     #[test]
     fn delegates_printable_prediction_to_base() {
-        let screen = Screen::new(Size { cols: 10, rows: 2 });
+        let mut screen = Screen::new(Size { cols: 10, rows: 2 });
+        let mut parser = vte::Parser::new();
+        screen.feed(&mut parser, b"$ ");
         let mut predictor = ExampleApplicationPredictor::new(true);
 
         predictor.on_key(KeyIntent::Printable('x'), &screen);
