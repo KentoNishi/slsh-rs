@@ -33,37 +33,37 @@ For noninteractive sessions, `slsh` runs plain `ssh` passthrough.
 Linux x86_64:
 
 ```sh
-sudo curl -fsSLo /usr/local/bin/slsh https://github.com/KentoNishi/slsh-rs/releases/latest/download/slsh-linux-x86_64 && echo 'abf11c3ffdc599bc5ce4d11d38c6ecac5c73d8d8a247352e2425945afd6966ed  /usr/local/bin/slsh' | sha256sum -c - && sudo chmod +x /usr/local/bin/slsh
+sudo curl -fsSLo /usr/local/bin/slsh https://github.com/KentoNishi/slsh-rs/releases/latest/download/slsh-linux-x86_64 && echo '7414422ca5a25581f55b80af3ac3633c0e843f8ab1d6e8b266b729d6f4aae1ab  /usr/local/bin/slsh' | sha256sum -c - && sudo chmod +x /usr/local/bin/slsh
 ```
 
 Linux ARM64:
 
 ```sh
-sudo curl -fsSLo /usr/local/bin/slsh https://github.com/KentoNishi/slsh-rs/releases/latest/download/slsh-linux-aarch64 && echo '0580c53d6aa390ad0ed699bde8fb1e012334eedd5f5ef89634e5a40c45ba157b  /usr/local/bin/slsh' | sha256sum -c - && sudo chmod +x /usr/local/bin/slsh
+sudo curl -fsSLo /usr/local/bin/slsh https://github.com/KentoNishi/slsh-rs/releases/latest/download/slsh-linux-aarch64 && echo 'ac5da8b37a5272f1b87a8bef3977247d9f835a6098908d9da8774bc2716089ae  /usr/local/bin/slsh' | sha256sum -c - && sudo chmod +x /usr/local/bin/slsh
 ```
 
 macOS x86_64:
 
 ```sh
-sudo curl -fsSLo /usr/local/bin/slsh https://github.com/KentoNishi/slsh-rs/releases/latest/download/slsh-macos-x86_64 && echo 'c9f18fe5c00ee16d27f485c87df2b11002056ebb41e164638960f84a715f84ec  /usr/local/bin/slsh' | shasum -a 256 -c - && sudo chmod +x /usr/local/bin/slsh
+sudo curl -fsSLo /usr/local/bin/slsh https://github.com/KentoNishi/slsh-rs/releases/latest/download/slsh-macos-x86_64 && echo '967f505bc969f6f710e26b85c9aa69c389b3835fc335359cffdb160a0ca9cc0b  /usr/local/bin/slsh' | shasum -a 256 -c - && sudo chmod +x /usr/local/bin/slsh
 ```
 
 macOS ARM64:
 
 ```sh
-sudo curl -fsSLo /usr/local/bin/slsh https://github.com/KentoNishi/slsh-rs/releases/latest/download/slsh-macos-aarch64 && echo '9846d798fa36554a3677f86591ed032fff0883dbe1139a183b1e69b94161f927  /usr/local/bin/slsh' | shasum -a 256 -c - && sudo chmod +x /usr/local/bin/slsh
+sudo curl -fsSLo /usr/local/bin/slsh https://github.com/KentoNishi/slsh-rs/releases/latest/download/slsh-macos-aarch64 && echo '4ca390941b4a38352087ad5c94a4f774438e3b9ee255e450d91b31e58cb54103  /usr/local/bin/slsh' | shasum -a 256 -c - && sudo chmod +x /usr/local/bin/slsh
 ```
 
 Windows x86_64 (PowerShell):
 
 ```powershell
-iwr https://github.com/KentoNishi/slsh-rs/releases/latest/download/slsh-windows-x86_64.exe -OutFile $env:LOCALAPPDATA\Microsoft\WindowsApps\slsh.exe; if((Get-FileHash $env:LOCALAPPDATA\Microsoft\WindowsApps\slsh.exe).Hash -ine 'e2ea0058d57d2ee8ac23fc5993ecbb75b699c10b68a198680914f67084b6cf8a'){exit 1}
+iwr https://github.com/KentoNishi/slsh-rs/releases/latest/download/slsh-windows-x86_64.exe -OutFile $env:LOCALAPPDATA\Microsoft\WindowsApps\slsh.exe; if((Get-FileHash $env:LOCALAPPDATA\Microsoft\WindowsApps\slsh.exe).Hash -ine '3e9e0a9ebb108c965823da38783c5a7c2341b7f1fafa97b48bdbf8244e2853bd'){exit 1}
 ```
 
 Windows ARM64 (PowerShell):
 
 ```powershell
-iwr https://github.com/KentoNishi/slsh-rs/releases/latest/download/slsh-windows-aarch64.exe -OutFile $env:LOCALAPPDATA\Microsoft\WindowsApps\slsh.exe; if((Get-FileHash $env:LOCALAPPDATA\Microsoft\WindowsApps\slsh.exe).Hash -ine '8735456a99df775d174c2546915d2e886bdbbe458ebd5f6bd4aa860daf75abf3'){exit 1}
+iwr https://github.com/KentoNishi/slsh-rs/releases/latest/download/slsh-windows-aarch64.exe -OutFile $env:LOCALAPPDATA\Microsoft\WindowsApps\slsh.exe; if((Get-FileHash $env:LOCALAPPDATA\Microsoft\WindowsApps\slsh.exe).Hash -ine '9c69a57d5d3197daa134eff0a30406d5859fcb6542464bec4d9fc99a5ded1b42'){exit 1}
 ```
 
 Each command downloads the latest release asset, checks its SHA-256, and installs `slsh` into the platform PATH.
