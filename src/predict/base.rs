@@ -1798,6 +1798,24 @@ mod tests {
     }
 
     #[test]
+    fn windows_terminal_mode_noise_waits_for_prompt_before_prediction() {
+        let mut screen = screen_with(b"\x1b[?9001h\x1b[?1004h");
+        let mut predictor = BasePredictor::new(true);
+
+        predictor.on_key(KeyIntent::Printable('a'), &screen);
+
+        assert!(predictor.overlay.cells.is_empty());
+
+        feed(&mut screen, b"$ ");
+        predictor.reconcile(&screen);
+        predictor.on_key(KeyIntent::Printable('b'), &screen);
+
+        assert_eq!(predictor.overlay.cells.len(), 1);
+        assert_eq!(predictor.overlay.cells[0].cell.ch, 'b');
+        assert_eq!(predictor.overlay.cells[0].pos, Cursor { row: 0, col: 2 });
+    }
+
+    #[test]
     fn vim_normal_mode_printable_waits_for_insert_screen() {
         let mut screen = screen_with_size(
             Size { cols: 40, rows: 4 },
@@ -1816,6 +1834,27 @@ mod tests {
 
         assert_eq!(predictor.overlay.cells.len(), 1);
         assert_eq!(predictor.overlay.cells[0].cell.ch, 's');
+        assert_eq!(predictor.overlay.cells[0].pos, Cursor { row: 0, col: 0 });
+    }
+
+    #[test]
+    fn vim_buffer_text_does_not_unlock_insert_prediction() {
+        let mut screen = screen_with_size(
+            Size { cols: 40, rows: 4 },
+            b"\x1b[?1049hINSERT is just file text\x1b[2;1H~\x1b[1;1H",
+        );
+        let mut predictor = BasePredictor::new(true);
+
+        predictor.on_key(KeyIntent::Printable('x'), &screen);
+
+        assert!(predictor.overlay.cells.is_empty());
+
+        feed(&mut screen, b"\x1b[4;1H-- INSERT --\x1b[1;1H");
+        predictor.reconcile(&screen);
+        predictor.on_key(KeyIntent::Printable('x'), &screen);
+
+        assert_eq!(predictor.overlay.cells.len(), 1);
+        assert_eq!(predictor.overlay.cells[0].cell.ch, 'x');
         assert_eq!(predictor.overlay.cells[0].pos, Cursor { row: 0, col: 0 });
     }
 
